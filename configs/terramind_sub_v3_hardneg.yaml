@@ -1,0 +1,54 @@
+# Stage A v3: continue training stageA_v2_india with mined hard negatives.
+# Manual review (2026-07-08) found near-all "new" v2_india candidates were false
+# positives -- mostly bare/exposed natural land confused for a substation's
+# gravel yard. Added 898 hard-negative chips (scripts/mine_hard_negatives.py)
+# built at the exact false-positive locations; combined index 1237 -> 2135.
+# Same architecture/loss/lr as v2_india -- the only variable changed is the
+# added hard negatives, to isolate their effect.
+
+data:
+  index_path: data/chips/combined/index.parquet
+  batch_size: 8
+  num_workers: 4
+  modalities: [S2L2A]
+
+task:
+  model_factory: EncoderDecoderFactory
+  model_args:
+    backbone: terramind_v1_tiny
+    backbone_pretrained: true
+    backbone_modalities: [S2L2A]
+    backbone_bands:
+      S2L2A: [BLUE, GREEN, RED, RED_EDGE_1, RED_EDGE_2, RED_EDGE_3,
+              NIR_BROAD, NIR_NARROW, SWIR_1, SWIR_2]
+    necks:
+      - name: SelectIndices
+        indices: [2, 5, 8, 11]
+      - name: ReshapeTokensToImage
+        remove_cls_token: false
+      - name: LearnedInterpolateToPyramidal
+    decoder: UNetDecoder
+    decoder_channels: [256, 128, 64, 32]
+    num_classes: 2
+    rescale: true
+  loss: tversky
+  tversky_args: {alpha: 0.35, beta: 0.65, gamma: 1.33}
+  class_weights: [0.25, 0.75]
+  ignore_index: -1
+  lr: 5.0e-5
+  optimizer: AdamW
+  optimizer_hparams:
+    weight_decay: 0.05
+  freeze_backbone: false
+  plot_on_val: false
+
+init_weights_from: data/models/stageA_v2_india/terramind-sub-epoch=01-step=152.ckpt
+
+trainer:
+  max_epochs: 60
+  accumulate_grad_batches: 2
+
+checkpoint_dir: data/models/stageA_v3_hardneg
+patience: 15
+monitor: val/mIoU
+monitor_mode: max

@@ -1,0 +1,58 @@
+# Stage A: S2-only TerraMind fine-tuning for substation segmentation.
+# Architecturally identical to earthpv's validated terramind_pv.yaml (de-risks the
+# whole pipeline); only paths, class semantics and the recall target differ.
+
+data:
+  # Merged india_pilot + pakistan chip index (built by scripts/merge_chip_index.py)
+  index_path: data/chips/combined/index.parquet
+  batch_size: 8
+  num_workers: 4
+  modalities: [S2L2A]        # single-modality -> datamodule returns a plain tensor
+
+task:
+  model_factory: EncoderDecoderFactory
+  model_args:
+    backbone: terramind_v1_tiny   # fits the GTX 1060; bump to _small on a bigger GPU
+    backbone_pretrained: true
+    backbone_modalities: [S2L2A]
+    backbone_bands:
+      S2L2A: [BLUE, GREEN, RED, RED_EDGE_1, RED_EDGE_2, RED_EDGE_3,
+              NIR_BROAD, NIR_NARROW, SWIR_1, SWIR_2]
+    necks:
+      - name: SelectIndices
+        indices: [2, 5, 8, 11]
+      - name: ReshapeTokensToImage
+        remove_cls_token: false
+      - name: LearnedInterpolateToPyramidal
+    decoder: UNetDecoder
+    decoder_channels: [256, 128, 64, 32]
+    num_classes: 2
+    rescale: true
+  # Recall-first: Tversky with beta>alpha penalises false negatives (missed
+  # substations) harder than false positives. gamma=1 = plain Tversky. train.py
+  # injects this as an smp loss module (TerraTorch has no built-in Tversky).
+  # Substations are rare, blocky positives. beta>>alpha (earthpv's 0.3/0.7) collapses to
+  # predicting positive everywhere (recall-flood); a near-balanced Tversky with a mild
+  # recall lean keeps precision while still favouring missed-substation recall.
+  loss: tversky
+  tversky_args: {alpha: 0.4, beta: 0.6, gamma: 1.0}
+  class_weights: [0.25, 0.75]
+  ignore_index: -1
+  lr: 1.0e-4
+  optimizer: AdamW
+  optimizer_hparams:
+    weight_decay: 0.05
+  freeze_backbone: false
+  plot_on_val: false
+
+trainer:
+  max_epochs: 60
+  accumulate_grad_batches: 2
+
+checkpoint_dir: data/models/stageA_s2
+patience: 10
+# Monitor val/mIoU, NOT val/Accuracy: macro recall is maximised by the recall-flood
+# (predict-positive-everywhere) failure mode, so it selected a useless checkpoint. mIoU
+# rewards precise overlap, selecting a model that actually localises substations.
+monitor: val/mIoU
+monitor_mode: max

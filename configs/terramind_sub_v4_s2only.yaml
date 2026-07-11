@@ -1,0 +1,49 @@
+# v4 fusion experiment — CONTROL arm: S2-only, fresh from TerraMind pretrained.
+# Identical to terramind_sub_v4_s1fusion.yaml except the S1RTC modality; both train
+# fresh (no warm-start lineage) on the same combined index so the S1 delta is the
+# only variable. Not intended for production — v3b remains the deployed S2 model.
+
+data:
+  index_path: data/chips/combined/index.parquet
+  batch_size: 8
+  num_workers: 4
+  modalities: [S2L2A]
+
+task:
+  model_factory: EncoderDecoderFactory
+  model_args:
+    backbone: terramind_v1_tiny
+    backbone_pretrained: true
+    backbone_modalities: [S2L2A]
+    backbone_bands:
+      S2L2A: [BLUE, GREEN, RED, RED_EDGE_1, RED_EDGE_2, RED_EDGE_3,
+              NIR_BROAD, NIR_NARROW, SWIR_1, SWIR_2]
+    necks:
+      - name: SelectIndices
+        indices: [2, 5, 8, 11]
+      - name: ReshapeTokensToImage
+        remove_cls_token: false
+      - name: LearnedInterpolateToPyramidal
+    decoder: UNetDecoder
+    decoder_channels: [256, 128, 64, 32]
+    num_classes: 2
+    rescale: true
+  loss: tversky
+  tversky_args: {alpha: 0.35, beta: 0.65, gamma: 1.33}
+  class_weights: [0.25, 0.75]
+  ignore_index: -1
+  lr: 1.0e-4
+  optimizer: AdamW
+  optimizer_hparams:
+    weight_decay: 0.05
+  freeze_backbone: false
+  plot_on_val: false
+
+trainer:
+  max_epochs: 60
+  accumulate_grad_batches: 2
+
+checkpoint_dir: data/models/stageA_v4_s2only
+patience: 15
+monitor: val/mIoU
+monitor_mode: max

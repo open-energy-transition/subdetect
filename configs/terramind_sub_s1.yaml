@@ -1,0 +1,56 @@
+# Stage B: S2 + S1 dual-modality TerraMind fine-tuning.
+# Delta vs terramind_sub.yaml: adds the pretrained S1RTC modality (VV/VH). TerraMind
+# builds one patch-embed per modality and merges tokens with merge_method='mean'
+# (default), so the necks/decoder are UNCHANGED vs the S2-only config.
+
+data:
+  index_path: data/chips/combined/index.parquet
+  # Token sequence doubles (2 modalities) -> attention memory ~4x on the 6 GB GTX
+  # 1060, so halve the batch and double grad accumulation to keep the effective
+  # batch size (16) identical to Stage A.
+  batch_size: 4
+  num_workers: 4
+  modalities: [S2L2A, S1RTC]   # dual -> datamodule returns {"S2L2A": t, "S1RTC": t}
+
+task:
+  model_factory: EncoderDecoderFactory
+  model_args:
+    backbone: terramind_v1_tiny
+    backbone_pretrained: true
+    backbone_modalities: [S2L2A, S1RTC]
+    backbone_bands:
+      S2L2A: [BLUE, GREEN, RED, RED_EDGE_1, RED_EDGE_2, RED_EDGE_3,
+              NIR_BROAD, NIR_NARROW, SWIR_1, SWIR_2]
+      S1RTC: [VV, VH]
+    # Small dropout of a whole modality during training -> robustness to cells where
+    # the S1 composite is missing/degraded at inference.
+    backbone_modality_drop_rate: 0.1
+    necks:
+      - name: SelectIndices
+        indices: [2, 5, 8, 11]
+      - name: ReshapeTokensToImage
+        remove_cls_token: false
+      - name: LearnedInterpolateToPyramidal
+    decoder: UNetDecoder
+    decoder_channels: [256, 128, 64, 32]
+    num_classes: 2
+    rescale: true
+  loss: tversky
+  tversky_args: {alpha: 0.3, beta: 0.7, gamma: 1.0}
+  class_weights: [0.25, 0.75]
+  ignore_index: -1
+  lr: 1.0e-4
+  optimizer: AdamW
+  optimizer_hparams:
+    weight_decay: 0.05
+  freeze_backbone: false
+  plot_on_val: false
+
+trainer:
+  max_epochs: 60
+  accumulate_grad_batches: 4
+
+checkpoint_dir: data/models/stageB_s2s1
+patience: 8
+monitor: val/Accuracy
+monitor_mode: max

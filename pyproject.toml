@@ -1,0 +1,20 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "subdetect"
+version = "0.1.0"
+description = "Electrical substation detection from Sentinel-2 (+Sentinel-1) with TerraMind and OSM power labels"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = []
+
+[project.scripts]
+subdetect = "subdetect.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/subdetect"]
+
+[tool.ruff]
+line-length = 100

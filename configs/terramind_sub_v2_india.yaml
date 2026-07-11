@@ -1,0 +1,55 @@
+# Stage A v2b: continue training stageA_v2_20k with the expanded India dataset
+# (round-2 compose added 168 more >=20000 m2 India training cells: 300 -> 474
+# composited, chip index 979 -> 1237 combined chips). Same architecture/loss as
+# v2; warm-starts from v2's weights instead of the raw TerraMind backbone.
+
+data:
+  index_path: data/chips/combined/index.parquet
+  batch_size: 8
+  num_workers: 4
+  modalities: [S2L2A]
+
+task:
+  model_factory: EncoderDecoderFactory
+  model_args:
+    backbone: terramind_v1_tiny
+    backbone_pretrained: true
+    backbone_modalities: [S2L2A]
+    backbone_bands:
+      S2L2A: [BLUE, GREEN, RED, RED_EDGE_1, RED_EDGE_2, RED_EDGE_3,
+              NIR_BROAD, NIR_NARROW, SWIR_1, SWIR_2]
+    necks:
+      - name: SelectIndices
+        indices: [2, 5, 8, 11]
+      - name: ReshapeTokensToImage
+        remove_cls_token: false
+      - name: LearnedInterpolateToPyramidal
+    decoder: UNetDecoder
+    decoder_channels: [256, 128, 64, 32]
+    num_classes: 2
+    rescale: true
+  loss: tversky
+  tversky_args: {alpha: 0.35, beta: 0.65, gamma: 1.33}
+  class_weights: [0.25, 0.75]
+  ignore_index: -1
+  # Lower than v2's 1e-4: warm-starting from already-converged weights, not the
+  # raw backbone, so a smaller LR avoids undoing what v2 already learned.
+  lr: 5.0e-5
+  optimizer: AdamW
+  optimizer_hparams:
+    weight_decay: 0.05
+  freeze_backbone: false
+  plot_on_val: false
+
+# Warm-start weights (fresh optimizer/epoch count); ignored if checkpoint_dir
+# already has a last.ckpt (auto-resume takes priority, see train.py).
+init_weights_from: data/models/stageA_v2_20k/terramind-sub-epoch=50-step=3060.ckpt
+
+trainer:
+  max_epochs: 60
+  accumulate_grad_batches: 2
+
+checkpoint_dir: data/models/stageA_v2_india
+patience: 15
+monitor: val/mIoU
+monitor_mode: max

@@ -1,0 +1,46 @@
+# Areas of interest and label/chip/ROI parameters for substation detection.
+
+# Root of the sibling earthpv project, whose Pakistan Sentinel-2 composites we
+# reuse by hardlinking (same 0.1 deg grid via the shared grid_origin below).
+earthpv_composites: /run/media/tobi/aidisc/earthpv/data/composites
+
+# Substation polygons >= this (m2) are trained as class 1; smaller ones + node-only
+# substations are burned as ignore (-1). ~20000 m2 = ~200 Sentinel-2 pixels @ 10 m --
+# raised from 1000 (2026-07-08): the model underfit even on training data (IoU_1 <=
+# 0.11) because the loss was dominated by tiny 1k-5k m2 substations that are
+# unlearnable at 10 m resolution. Restrict training to the detectable, large,
+# transmission-class substations.
+min_sub_area_m2: 20000.0
+# Ignore-disc radius (m) burned around each power=substation *node* (no polygon to
+# rasterise; a node may be a large unmapped-outline sub, so never train it as bg).
+node_ignore_radius_m: 60.0
+# Default ROI radius (km) around power lines + substations (overridable: roi --radius-km).
+roi_radius_km: 20.0
+
+aois:
+  # ---- Inference target + Pakistan training source ----------------------------
+  # bbox + grid_origin copied VERBATIM from earthpv configs/aoi.yaml so our 0.1 deg
+  # cell names (f"{ix:04d}_{iy:04d}") are identical to earthpv's -> its ~1360
+  # already-composited Pakistan S2 cells map 1:1 and are reused by hardlinking.
+  pakistan:
+    bbox: [60.87, 23.80, 77.13, 37.09]
+    division: { name: Pakistan, country: PK, subtype: country }
+    grid_origin: [69.3405158324398, 27.7089663393252]
+    # Geographic val holdout: Sindh south block (Karachi-Hyderabad load centre),
+    # >400 km from the Punjab training clusters -> no jitter/window leakage.
+    val_bbox: [67.0, 24.0, 69.5, 26.5]
+
+  # ---- India training pilot (Indian Punjab + Haryana + Delhi) -----------------
+  # Best climatic/agricultural match to the Pakistan inference domain (Indus plain).
+  # Own grid; all India chips are train-only (domain-shift helper).
+  india_pilot:
+    bbox: [73.5, 27.4, 77.8, 32.6]
+    division: { name: India NW pilot, country: IN, subtype: region }
+    # Cap composited training cells (network-bound); ranked by summed substation area.
+    max_train_cells: 600
+
+# Dry-season composite window (matches earthpv's Pakistan base composites so
+# hardlinked cells are consistent with newly composed ones).
+s2_window: ["2025-11-01", "2026-03-15"]
+# Sentinel-1 window: same dry season (co-temporal with S2 for a clean dual-modality stack).
+s1_window: ["2025-11-01", "2026-03-15"]
