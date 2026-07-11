@@ -2,7 +2,7 @@
 
 ⚠️ This is a prototype that is not intended for production or collaboration purposes. If you would like to use this project, please contact the main developer. ⚠️
 
-Detects transmission-class power substations (≥ ~20,000 m²) in Sentinel-2 L2A
+Detects transmission-class power substations in Sentinel-2 L2A
 dry-season composites by fine-tuning the **TerraMind** geospatial foundation
 model (IBM/ESA) with **TerraTorch**. Labels come from OpenStreetMap power
 tags (Geofabrik PBF, no Overpass). Recall-oriented: candidates are ranked for
@@ -51,6 +51,44 @@ All long steps skip existing outputs, so they can be killed and re-run safely.
 The released Lindsay-Lab SWIN model (sibling repo `../substation-seg`) serves as a
 zero-shot second opinion; agreement filtering and OSM line-endpoint topology
 (AUC 0.95 vs reviewed FPs) concentrate the review lists.
+
+## Sentinel-1 + Sentinel-2 fusion
+
+**Why:** the dominant false-positive class is bare land — spectrally similar to a
+substation's gravel yard in single-date optical imagery. Radar separates them:
+transformers, gantries and busbars are corner reflectors (bright, especially in
+cross-pol VH), smooth bare soil scatters forward (dark). Measured on 150 known
+substations vs 150 human-reviewed bare-land FPs: **VH AUC 0.89** (substation
+median −11.4 dB vs −15.8 dB; `scripts/s1_separability.py`,
+`data/s1_separability_samples.csv`). Limit: large metal-roofed industrial
+buildings are also SAR-bright — S1 does not resolve that (smaller) FP class.
+
+**Data:** `compose --sensor s1` builds a dry-season Sentinel-1 RTC VV/VH
+composite per cell (`composite_s1.tif`), median in *linear power* (speckle-robust)
+then dB-encoded to uint16, pinned to the exact GeoBox of the cell's S2
+composite — pixel-aligned by construction. `chips --s1` (and
+`scripts/s1_for_hardneg.py` for the mined negatives) cut co-registered
+2-band S1 chips; the chip index gains an `s1` path column. At load time the
+datamodule decodes DN → dB → z-score and returns
+`{"image": {"S2L2A": t, "S1RTC": t}, "mask": m}`.
+
+**Model:** token-level mid-fusion inside TerraMind. Each modality has its own
+*pretrained* patch-embed (no SAR representation learned from scratch); both token
+sequences pass through the shared ViT encoder, so self-attention fuses S2 and S1
+patches; tokens at the same position are merged by mean before the (unchanged)
+neck + UNet decoder. `backbone_modality_drop_rate: 0.1` randomly drops a whole
+modality in training, so inference degrades gracefully where S1 is missing.
+Attention memory grows ~4× with the doubled sequence → batch 4 + grad-accum 4
+on the 6 GB GPU. `evaluate` and `infer` auto-detect dual-modality checkpoints
+from hparams and feed `composite_s1.tif` windows automatically.
+
+**Result (single-variable experiment, 2026-07-11):** `v4_s1fusion` vs
+`v4_s2only`, both fresh-initialized on the identical chip index. Pakistan val:
+fusion IoU 0.266 / **63% installation recall (≥20k m²)** vs control IoU 0.243 /
+32% — recall doubled, with the biggest gain on small/unknown-voltage
+installations (60% vs 10%). Fusion (fresh init) also beats the warm-started
+production v3b (IoU 0.237 / 45%). Caveats: 19-installation val set; 125/448
+hard-negative chips lacked S1 composites and were dropped from both arms.
 
 ## Beyond the CLI: analysis scripts
 
