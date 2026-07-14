@@ -82,13 +82,65 @@ Attention memory grows ~4× with the doubled sequence → batch 4 + grad-accum 4
 on the 6 GB GPU. `evaluate` and `infer` auto-detect dual-modality checkpoints
 from hparams and feed `composite_s1.tif` windows automatically.
 
-**Result (single-variable experiment, 2026-07-11):** `v4_s1fusion` vs
-`v4_s2only`, both fresh-initialized on the identical chip index. Pakistan val:
-fusion IoU 0.266 / **63% installation recall (≥20k m²)** vs control IoU 0.243 /
-32% — recall doubled, with the biggest gain on small/unknown-voltage
-installations (60% vs 10%). Fusion (fresh init) also beats the warm-started
-production v3b (IoU 0.237 / 45%). Caveats: 19-installation val set; 125/448
-hard-negative chips lacked S1 composites and were dropped from both arms.
+**Result (three-arm ablation, fresh init, identical chips/recipe, 2026-07-11):**
+
+| arm (Pakistan val, 19 installs) | pixel IoU | F1 | ≥20k m² recall | ≥220 kV |
+|---|---|---|---|---|
+| `v4_s1only` (VV/VH only) | **0.310** | **0.473** | **84%** | **100%** |
+| `v4_s1fusion` (S2+S1) | 0.266 | 0.420 | 63% | 71% |
+| `v4_s2only` (control) | 0.243 | 0.391 | 32% | 71% |
+
+Radar alone is the strongest single signal — corner-reflector texture identifies
+switchyards more reliably than optical spectra, and S1-only posts the best val
+numbers of any model in the project (prior best: v2_india IoU 0.274 / 60%).
+The naive mean-merge fusion *dilutes* rather than combines the signals; if fusion
+is revisited, try concat-merge or longer training. Note the FP profiles differ:
+S2 models fail on bare land, S1 models will fail on other radar-bright metal
+structures (industry, rail). Caveats: 19-installation val set, single seed;
+125/448 hard-negative chips lacked S1 composites and were dropped from all arms.
+
+## Osmose-guided regional detection (`scripts/osmose_detect.py`)
+
+End-to-end workflow to find *missing* substations anywhere, without needing the
+AOI/labels machinery: OpenStreetMap's Osmose QA engine already flags transmission
+lines that end nowhere ("unfinished major power line", item 7040 class 2) — a line
+must terminate at a substation, so each flagged endpoint far from any mapped
+substation marks a probable unmapped one. Line-endpoint topology was the strongest
+FP discriminator we measured (AUC 0.95), so these leads are high-prior by construction.
+
+```bash
+pixi run -e ml python scripts/osmose_detect.py --region punjab_in --country india_punjab
+# options: --bbox lon1,lat1,lon2,lat2   --sub-dist-m 700   --search-km 10
+#          --threshold 0.3   --workers 4   --limit-cells N   --dry-run
+```
+
+Steps (all resumable; `--dry-run` stops after the cell plan and cost estimate):
+
+1. **Fetch Osmose issues** for the country/state code (see osmose.openstreetmap.fr
+   for codes, e.g. `pakistan`, `india_punjab`). Fetched in 2° bbox tiles — the API
+   caps at ~500 issues per request.
+2. **Filter endpoints**: OSM substations for the region are fetched live from
+   Overpass (`power=substation`, any size incl. nodes — no local labels needed);
+   endpoints within `--sub-dist-m` (default 700 m) of one are dropped as
+   mapping-detail noise. Survivors → `endpoints.geojson`.
+3. **Cell plan**: all 0.1° cells within `--search-km` (default 10 km) of a surviving
+   endpoint. Typical state: tens to a few hundred cells (~38 MB and ~2 min each).
+4. **Compose S2 + S1** dry-season composites for exactly those cells
+   (same code paths as the main pipeline; S1 pinned to the S2 grid).
+5. **Detect with the established best stack**: tiled Hann-blended inference where
+   `P = P_S1only × (0.5 + 0.5 · P_S2only)` — the S1-only detector (best recall,
+   84% ≥20k m² on val) softly gated by the optical model (best measured pixel
+   config, IoU 0.345; the gate damps radar-bright industrial FPs but cannot veto).
+   Checkpoints default to `stageA_v4_s1only` / `stageA_v4_s2only` best epochs.
+6. **Post-process**: polygonize at `--threshold` (0.3), drop candidates below the
+   20k m² area floor, rank by `confidence × exp(−endpoint_distance / 2 km)` —
+   candidates that sit where an unfinished line points are ranked first.
+
+Output under `data/osmose_regions/<region>/`: `endpoints.geojson`,
+`composites/<cell>/composite_{0,s1}.tif`, `prob/<cell>.tif`, and **`leads.geojson`**
+(review-ready, sorted; columns: `confidence`, `area_m2`, `endpoint_dist_m`,
+`n_endpoints_in_radius`, `rank_score`). Every lead should be human-validated
+against high-resolution imagery before mapping.
 
 ## Beyond the CLI: analysis scripts
 

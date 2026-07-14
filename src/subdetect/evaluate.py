@@ -71,7 +71,8 @@ def evaluate(aoi: str, checkpoint: Path, chips_dir: Path, threshold: float = 0.3
     task = SemanticSegmentationTask.load_from_checkpoint(checkpoint, map_location="cpu").eval()
     device = "cuda" if torch.cuda.is_available() else "cpu"
     task = task.to(device)
-    dual = "S1RTC" in task.hparams.get("model_args", {}).get("backbone_modalities", [])
+    mods = task.hparams.get("model_args", {}).get("backbone_modalities", ["S2L2A"])
+    dual = "S1RTC" in mods
 
     tp = fp = fn = 0
     det, mis = [], []  # (area, voltage) of GT installations
@@ -83,7 +84,7 @@ def evaluate(aoi: str, checkpoint: Path, chips_dir: Path, threshold: float = 0.3
         s2 = torch.from_numpy(arr / 10000.0)[None].to(device)
         if dual:
             s1 = torch.from_numpy(_load_s1(row["s1"]))[None].to(device)
-            x = {"S2L2A": s2, "S1RTC": s1}
+            x = {m: (s2 if m == "S2L2A" else s1) for m in mods}
         else:
             x = s2
         with torch.no_grad(), torch.autocast(device_type=device, enabled=device == "cuda"):

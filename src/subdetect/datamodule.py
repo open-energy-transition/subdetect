@@ -71,8 +71,10 @@ class SubChipDataset(Dataset):
 
         mask_t = torch.from_numpy(mask)
         if self.dual:
-            return {"image": {"S2L2A": torch.from_numpy(s2), "S1RTC": torch.from_numpy(s1)},
-                    "mask": mask_t}
+            img = {"S1RTC": torch.from_numpy(s1)}
+            if "S2L2A" in self.modalities:
+                img["S2L2A"] = torch.from_numpy(s2)
+            return {"image": img, "mask": mask_t}
         return {"image": torch.from_numpy(s2), "mask": mask_t}
 
 
