@@ -1,4 +1,4 @@
-# subdetect — power substation detection from Sentinel-2/-1
+# subdetect - power substation detection from Sentinel-2/-1
 
 ⚠️ This is a prototype that is not intended for production or collaboration purposes. If you would like to use this project, please contact the main developer. ⚠️
 
