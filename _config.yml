@@ -1,0 +1,19 @@
+title: subdetect
+description: OSM electrical-substation detection from Sentinel-1/2 imagery via TerraMind, with an Osmose-guided regional lead-generation workflow.
+theme: jekyll-theme-cayman
+markdown: kramdown
+
+# GitHub Pages' default build already includes jekyll-relative-links (rewrites
+# .md links to the generated .html pages), jekyll-readme-index (serves README.md
+# as the site homepage), and jekyll-optional-front-matter / jekyll-titles-from-
+# headings (so README.md needs no front matter block to get a sensible page
+# title) -- no Gemfile or explicit plugin list needed for a repo-hosted Pages site.
+
+exclude:
+  - pixi.toml
+  - pixi.lock
+  - pyproject.toml
+  - scripts/
+  - src/
+  - configs/
+  - "*.log"

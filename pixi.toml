@@ -47,6 +47,7 @@ compose = "python -m subdetect.cli compose"
 chips = "python -m subdetect.cli chips"
 postprocess = "python -m subdetect.cli postprocess"
 export = "python -m subdetect.cli export"
+docs-assets = "python scripts/make_docs_assets.py"
 
 [feature.ml.tasks]
 train = "python -m subdetect.cli train"

@@ -1,18 +1,44 @@
-# subdetect - power substation detection from Sentinel-2/-1
+# subdetect — power substation detection from Sentinel-2/-1
 
 ⚠️ This is a prototype that is not intended for production or collaboration purposes. If you would like to use this project, please contact the main developer. ⚠️
 
-Detects transmission-class power substations in Sentinel-2 L2A
-dry-season composites by fine-tuning the **TerraMind** geospatial foundation
-model (IBM/ESA) with **TerraTorch**. Labels come from OpenStreetMap power
-tags (Geofabrik PBF, no Overpass). Recall-oriented: candidates are ranked for
-human validation against imagery (MapRoulette export included) — raw candidate
-lists are NOT trustworthy without review.
+![Pipeline architecture: core CLI plus the Osmose regional side-path](docs/assets/architecture.svg)
+
+subdetect finds electrical substations in satellite imagery, then goes one step
+further: it uses OpenStreetMap's own data-quality tooling to point itself at
+places a substation is *probably missing from the map*, and produces a ranked,
+human-reviewable list of leads. The figure below is real output — a real
+Sentinel-2/Sentinel-1 image pair, a real model prediction, and a real detected
+polygon, from the Yunnan (China) pilot run described later in this README.
+
+![Anatomy of one detection](docs/assets/worked_example_panel.png)
+
+*(full walkthrough of this figure: [docs/worked-example.md](docs/worked-example.md))*
+
+## What it does, concretely
+
+It fine-tunes IBM/ESA's **TerraMind** geospatial foundation model (via
+**TerraTorch**) to segment transmission-class substations in Sentinel-2 optical
+and Sentinel-1 radar composites, using OpenStreetMap power tags as training
+labels. New/unfamiliar terms (**TerraMind**, **corner reflector**, **Osmose**,
+**hysteresis polygonization**, ...) are defined the first time they matter in
+[docs/glossary.md](docs/glossary.md).
 
 - **Training regions:** Pakistan + NW-India pilot (Indian Punjab/Haryana/Delhi), plus mined hard negatives
-- **Inference targets:** Pakistan (1,564 cells), India pilot (474 cells)
-- **Imagery:** cloud-masked dry-season medians (2025-11 → 2026-03), 10 S2 L2A bands @ 10 m,
-  optional co-registered Sentinel-1 RTC VV/VH, from Microsoft Planetary Computer
+- **Inference targets:** Pakistan (1,564 cells), India pilot (474 cells), plus two Osmose-guided regional pilots (Yunnan, China; Sindh, Pakistan)
+- **Imagery:** cloud-masked dry-season medians (2025-11 → 2026-03), 10 Sentinel-2 L2A bands @ 10 m, optional co-registered Sentinel-1 RTC VV/VH, from Microsoft Planetary Computer (falling back to AWS Earth Search on outage)
+
+## This project depends on a sibling repo: `earthpv`
+
+subdetect is forked from **earthpv** (a rooftop solar PV detection project) and
+still depends on it in a load-bearing way, not just historically: the Sentinel-2
+band mapping and the 0.1° grid lattice (`grid_origin` in `configs/aoi.yaml`) are
+copied *verbatim* so that composited cells are byte-compatible and name-compatible
+between the two projects — `scripts/link_pakistan_composites.py` hardlinks
+earthpv's already-composited Pakistan cells straight into subdetect at zero
+re-download cost. If you're setting this up without access to earthpv's data,
+expect Pakistan's `compose` step to take substantially longer than it does here.
+Full detail: [docs/architecture.md#the-earthpv-relationship](docs/architecture.md#the-earthpv-relationship).
 
 ## Setup
 
@@ -22,7 +48,7 @@ pixi install -e ml    # + PyTorch cu126 (Pascal-safe) + TerraTorch
 pixi run -e ml gpu-check
 ```
 
-## Pipeline
+## Quickstart
 
 ```bash
 pixi run osm      --aoi pakistan          # Geofabrik PBF -> power lines/substations
@@ -37,118 +63,68 @@ pixi run export      --aoi pakistan --pred-dir data/predictions_v3b   # GeoJSON 
 ```
 
 All long steps skip existing outputs, so they can be killed and re-run safely.
+Full stage-by-stage explanation: [docs/architecture.md](docs/architecture.md).
 
-## Model lineage (Pakistan val: pixel IoU / ≥20k m² recall)
+## Sentinel-1 + Sentinel-2 fusion: the headline result
 
-| model | change | notes |
-|---|---|---|
-| v1 | 1k m² label floor | underfit (train IoU ≤ 0.11) |
-| v2 | 20k m² floor, focal Tversky | 0.30 / 60% |
-| v2_india | + India chips | best deep recall; new-lead precision ~0.4% (bare-land FPs) |
-| v3 / v3b | + mined hard negatives (1×/0.5×) | 8–15× fewer candidates, best top-100 triage yield (v3b) |
-| v4_s2only / v4_s1fusion | fresh-init S1 fusion experiment | see `configs/terramind_sub_v4_*.yaml` |
-
-The released Lindsay-Lab SWIN model (sibling repo `../substation-seg`) serves as a
-zero-shot second opinion; agreement filtering and OSM line-endpoint topology
-(AUC 0.95 vs reviewed FPs) concentrate the review lists.
-
-## Sentinel-1 + Sentinel-2 fusion
-
-**Why:** the dominant false-positive class is bare land — spectrally similar to a
+The dominant false-positive class is bare land — spectrally similar to a
 substation's gravel yard in single-date optical imagery. Radar separates them:
-transformers, gantries and busbars are corner reflectors (bright, especially in
+substation gantries and busbars are corner reflectors (bright, especially in
 cross-pol VH), smooth bare soil scatters forward (dark). Measured on 150 known
-substations vs 150 human-reviewed bare-land FPs: **VH AUC 0.89** (substation
-median −11.4 dB vs −15.8 dB; `scripts/s1_separability.py`,
-`data/s1_separability_samples.csv`). Limit: large metal-roofed industrial
-buildings are also SAR-bright — S1 does not resolve that (smaller) FP class.
+substations vs. 150 human-reviewed bare-land false positives: **VH AUC 0.89**
+(`scripts/s1_separability.py`).
 
-**Data:** `compose --sensor s1` builds a dry-season Sentinel-1 RTC VV/VH
-composite per cell (`composite_s1.tif`), median in *linear power* (speckle-robust)
-then dB-encoded to uint16, pinned to the exact GeoBox of the cell's S2
-composite — pixel-aligned by construction. `chips --s1` (and
-`scripts/s1_for_hardneg.py` for the mined negatives) cut co-registered
-2-band S1 chips; the chip index gains an `s1` path column. At load time the
-datamodule decodes DN → dB → z-score and returns
-`{"image": {"S2L2A": t, "S1RTC": t}, "mask": m}`.
+That motivated a real architectural fusion model — and the result was a genuine
+surprise:
 
-**Model:** token-level mid-fusion inside TerraMind. Each modality has its own
-*pretrained* patch-embed (no SAR representation learned from scratch); both token
-sequences pass through the shared ViT encoder, so self-attention fuses S2 and S1
-patches; tokens at the same position are merged by mean before the (unchanged)
-neck + UNet decoder. `backbone_modality_drop_rate: 0.1` randomly drops a whole
-modality in training, so inference degrades gracefully where S1 is missing.
-Attention memory grows ~4× with the doubled sequence → batch 4 + grad-accum 4
-on the 6 GB GPU. `evaluate` and `infer` auto-detect dual-modality checkpoints
-from hparams and feed `composite_s1.tif` windows automatically.
-
-**Result (three-arm ablation, fresh init, identical chips/recipe, 2026-07-11):**
+![3-arm ablation: recall by size and voltage class](docs/assets/model_lineage_ablation.png)
 
 | arm (Pakistan val, 19 installs) | pixel IoU | F1 | ≥20k m² recall | ≥220 kV |
 |---|---|---|---|---|
 | `v4_s1only` (VV/VH only) | **0.310** | **0.473** | **84%** | **100%** |
-| `v4_s1fusion` (S2+S1) | 0.266 | 0.420 | 63% | 71% |
+| `v4_s1fusion` (S2+S1, mid-fusion) | 0.266 | 0.420 | 63% | 71% |
 | `v4_s2only` (control) | 0.243 | 0.391 | 32% | 71% |
 
-Radar alone is the strongest single signal — corner-reflector texture identifies
-switchyards more reliably than optical spectra, and S1-only posts the best val
-numbers of any model in the project (prior best: v2_india IoU 0.274 / 60%).
-The naive mean-merge fusion *dilutes* rather than combines the signals; if fusion
-is revisited, try concat-merge or longer training. Note the FP profiles differ:
-S2 models fail on bare land, S1 models will fail on other radar-bright metal
-structures (industry, rail). Caveats: 19-installation val set, single seed;
-125/448 hard-negative chips lacked S1 composites and were dropped from all arms.
+**Radar alone beat the fusion model.** The naive mean-merge fusion architecture
+diluted rather than combined the two signals. Full mechanism, data pipeline, and
+the ongoing retest of this result under a fixed data-starvation confound:
+[docs/model-lineage.md](docs/model-lineage.md#v5-removing-the-floor-again).
 
-## Osmose-guided regional detection (`scripts/osmose_detect.py`)
+## Model lineage, in brief
 
-End-to-end workflow to find *missing* substations anywhere, without needing the
-AOI/labels machinery: OpenStreetMap's Osmose QA engine already flags transmission
-lines that end nowhere ("unfinished major power line", item 7040 class 2) — a line
-must terminate at a substation, so each flagged endpoint far from any mapped
-substation marks a probable unmapped one. Line-endpoint topology was the strongest
-FP discriminator we measured (AUC 0.95), so these leads are high-prior by construction.
+The current best model is the product of several rounds of debugging, not one
+training run — including at least one full negative result (see above) and a
+training floor that was raised, then deliberately lowered again once the reason
+for raising it no longer applied. Full story, all six iterations, with charts:
+[docs/model-lineage.md](docs/model-lineage.md).
+
+## Osmose-guided regional detection
+
+`scripts/osmose_detect.py` runs the established best model over *any* region,
+worldwide, with no pre-existing labels required — using OpenStreetMap's Osmose
+QA engine to find transmission lines that dead-end without reaching a
+substation, which is a strong prior that a real, unmapped substation exists
+nearby (line-endpoint topology: AUC 0.95 vs. reviewed false positives).
+
+![Regional leads map: Yunnan, China](docs/assets/regional_map_yunnan.png)
 
 ```bash
-pixi run -e ml python scripts/osmose_detect.py --region punjab_in --country india_punjab
-# options: --bbox lon1,lat1,lon2,lat2   --sub-dist-m 700   --search-km 10
-#          --threshold 0.3   --workers 4   --limit-cells N   --dry-run
+pixi run -e ml python scripts/osmose_detect.py --region yunnan --country china_yunnan \
+    --search-km 20 --tile-deg 1.0 --batch-cells 400 --delete-composites
 ```
 
-Steps (all resumable; `--dry-run` stops after the cell plan and cost estimate):
+Run as two independent pilots so far — Yunnan, China (153 cells, 696 leads) and
+Sindh, Pakistan (145 cells, 614 leads) — both bandwidth-bounded first passes
+over a much larger set of Osmose-flagged candidates. Full workflow, output
+column reference, and results: [docs/osmose-detect.md](docs/osmose-detect.md).
 
-1. **Fetch Osmose issues** for the country/state code (see osmose.openstreetmap.fr
-   for codes, e.g. `pakistan`, `india_punjab`). Fetched in 2° bbox tiles — the API
-   caps at ~500 issues per request.
-2. **Filter endpoints**: OSM substations for the region are fetched live from
-   Overpass (`power=substation`, any size incl. nodes — no local labels needed);
-   endpoints within `--sub-dist-m` (default 700 m) of one are dropped as
-   mapping-detail noise. Survivors → `endpoints.geojson`.
-3. **Cell plan**: all 0.1° cells within `--search-km` (default 10 km) of a surviving
-   endpoint. Typical state: tens to a few hundred cells (~38 MB and ~2 min each).
-4. **Compose S2 + S1** dry-season composites for exactly those cells
-   (same code paths as the main pipeline; S1 pinned to the S2 grid).
-5. **Detect with the established best stack**: tiled Hann-blended inference where
-   `P = P_S1only × (0.5 + 0.5 · P_S2only)` — the S1-only detector (best recall,
-   84% ≥20k m² on val) softly gated by the optical model (best measured pixel
-   config, IoU 0.345; the gate damps radar-bright industrial FPs but cannot veto).
-   Checkpoints default to `stageA_v4_s1only` / `stageA_v4_s2only` best epochs.
-6. **Post-process**: polygonize at `--threshold` (0.3), drop candidates below the
-   20k m² area floor, rank by `confidence × exp(−endpoint_distance / 2 km)` —
-   candidates that sit where an unfinished line points are ranked first.
+## Documentation map
 
-Output under `data/osmose_regions/<region>/`: `endpoints.geojson`,
-`composites/<cell>/composite_{0,s1}.tif`, `prob/<cell>.tif`, and **`leads.geojson`**
-(review-ready, sorted; columns: `confidence`, `area_m2`, `endpoint_dist_m`,
-`n_endpoints_in_radius`, `rank_score`). Every lead should be human-validated
-against high-resolution imagery before mapping.
-
-## Beyond the CLI: analysis scripts
-
-- `scripts/rerank_s1.py` — sample S1 VH per candidate (metal prior), adds `rank_score_s1`
-- `scripts/osmose_leads.py` — Osmose "unfinished power line" endpoints (>700 m from any mapped substation) cross-referenced with model candidates; dual-evidence leads in `data/osmose/`
-- `scripts/mine_hard_negatives.py`, `scripts/s1_for_hardneg.py` — hard-negative chips (+S1)
-- `scripts/compose_s1_chip_cells.py` — targeted S1 compositing for chip cells only
-- `scripts/s1_separability.py`, `building_fill.py`, `optical_features.py` — FP-discriminator studies
+- [docs/architecture.md](docs/architecture.md) — full pipeline stage-by-stage, the earthpv relationship, and the `scripts/` catalogue
+- [docs/worked-example.md](docs/worked-example.md) — pixel-level walkthrough of one real detection
+- [docs/osmose-detect.md](docs/osmose-detect.md) — the Osmose regional workflow, output columns, real results
+- [docs/model-lineage.md](docs/model-lineage.md) — the full v1→v5 debugging story, with charts
+- [docs/glossary.md](docs/glossary.md) — every domain term used across this documentation
 
 ## Hardware note
 
