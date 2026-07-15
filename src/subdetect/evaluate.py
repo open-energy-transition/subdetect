@@ -46,12 +46,18 @@ def _load_s1(path: str) -> np.ndarray:
     return x
 
 
-def evaluate(aoi: str, checkpoint: Path, chips_dir: Path, threshold: float = 0.3) -> pd.DataFrame:
+def evaluate(aoi: str, checkpoint: Path, chips_dir: Path, threshold: float = 0.3,
+             min_area_m2: float | None = None) -> pd.DataFrame:
+    """`min_area_m2` overrides the settings label floor for which installations count
+    as ground truth here (0 = every substation polygon, matching a no-floor training
+    run); the settings floor otherwise silently gates out AREA_BUCKETS below it."""
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     import torch
     from terratorch.tasks import SemanticSegmentationTask
 
     settings = Settings.load()
+    if min_area_m2 is not None:
+        settings.min_sub_area_m2 = float(min_area_m2)
     _, cfg = resolve_aoi(aoi, settings)
     labels = load_substation_labels(Path("data/labels") / aoi, settings.min_sub_area_m2)
     labels = labels[labels.role == "pos"].reset_index(drop=True)

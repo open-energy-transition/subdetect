@@ -56,11 +56,14 @@ def chips(
     out_dir: Path = typer.Option(Path("data/chips")),
     limit: int = typer.Option(0, help="Cap number of chips (0 = no cap; for smoke tests)"),
     s1: bool = typer.Option(False, "--s1", help="Also write co-registered S1 chips (needs S1 composites)"),
+    min_area_m2: float = typer.Option(
+        None, help="Override the label floor for training masks (0 = no size floor)"),
 ) -> None:
     """Sample training chips: composite windows + burned substation masks."""
     from subdetect.chips import build_chips
 
-    build_chips(aoi=aoi, labels_dir=labels_dir, out_dir=out_dir, limit=limit, with_s1=s1)
+    build_chips(aoi=aoi, labels_dir=labels_dir, out_dir=out_dir, limit=limit, with_s1=s1,
+                min_area_m2=min_area_m2)
 
 
 @app.command()
@@ -80,11 +83,14 @@ def evaluate(
     checkpoint: Path = typer.Option(..., help="Trained model checkpoint"),
     chips_dir: Path = typer.Option(Path("data/chips")),
     threshold: float = typer.Option(0.3),
+    min_area_m2: float = typer.Option(
+        None, help="Override the label floor for ground-truth installations (0 = all)"),
 ) -> None:
     """Report pixel IoU/F1 and per-installation recall by area + voltage."""
     from subdetect.evaluate import evaluate as _eval
 
-    _eval(aoi=aoi, checkpoint=checkpoint, chips_dir=chips_dir, threshold=threshold)
+    _eval(aoi=aoi, checkpoint=checkpoint, chips_dir=chips_dir, threshold=threshold,
+          min_area_m2=min_area_m2)
 
 
 @app.command()

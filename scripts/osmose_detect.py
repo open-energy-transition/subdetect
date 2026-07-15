@@ -8,8 +8,15 @@ For a country/state/province (Osmose country code):
   4. Compose Sentinel-2 + Sentinel-1 dry-season composites for those cells (resumable).
   5. Tiled dual-model inference with the established best stack:
      P = P_S1only * (0.5 + 0.5 * P_S2only)   (soft optical gate, val IoU 0.345)
-  6. Polygonize (threshold 0.3), apply the 20k m2 area floor, rank by
-     confidence x endpoint-proximity prior; write review-ready GeoJSON.
+  6. Polygonize with hysteresis (seed 0.4, grow 0.2 -- seed kept below the 0.5
+     fusion plateau so S1-only detections survive; validated on sindh_test +
+     yunnan pilot vs the old single 0.3 threshold: fewer fragments, +1 recovered
+     substation each, AUC unchanged), flag (not drop) candidates below the 20k m2
+     area floor, rank by confidence (= component max prob; robust alternatives
+     tested and not better) x endpoint-proximity x line-proximity priors (the
+     line prior is the big one: sindh_test AUC 0.769 -> 0.967); write
+     review-ready GeoJSON with conf_p90/conf_mean/n_pixels/line_dist_m/
+     below_floor as extra review columns, below-floor rows sunk to the bottom.
 
 Usage:
   pixi run -e ml python scripts/osmose_detect.py --region punjab_in --country india_punjab
@@ -36,7 +43,7 @@ sys.path.insert(0, "src")
 from subdetect.imagery import annual_composite, s1_composite
 from subdetect.config import Settings, geodesic_area_m2
 from subdetect.roi import CELL_DEG
-from subdetect.postprocess import polygonize_chips
+from subdetect.postprocess import polygonize_chips_v2
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("osmose_detect")
@@ -86,6 +93,24 @@ def fetch_osmose(country: str, bbox=None, item=7040, klass="2", tile_deg=2.0, li
 
 
 # ------------------------------------------------------------- step 2: Overpass
+def fetch_power_lines(bbox) -> gpd.GeoDataFrame:
+    """OSM power=line ways in bbox as LineStrings (for the line-proximity prior)."""
+    from shapely.geometry import LineString
+
+    q = f"""[out:json][timeout:180];
+    way["power"="line"]({bbox[1]},{bbox[0]},{bbox[3]},{bbox[2]});
+    out geom;"""
+    r = requests.post(OVERPASS_API, data={"data": q}, headers=UA, timeout=240)
+    r.raise_for_status()
+    geoms = []
+    for el in r.json().get("elements", []):
+        coords = [(p["lon"], p["lat"]) for p in el.get("geometry", [])]
+        if len(coords) >= 2:
+            geoms.append(LineString(coords))
+    log.info("Overpass: %d power lines in region", len(geoms))
+    return gpd.GeoDataFrame(geometry=geoms, crs="EPSG:4326")
+
+
 def fetch_substations(bbox) -> gpd.GeoDataFrame:
     """All OSM power=substation centers in bbox via Overpass (any size, incl. nodes)."""
     q = f"""[out:json][timeout:180];
@@ -205,7 +230,11 @@ def main():
     ap.add_argument("--bbox", help="lon1,lat1,lon2,lat2 (else derived from the issues)")
     ap.add_argument("--sub-dist-m", type=float, default=700.0)
     ap.add_argument("--search-km", type=float, default=10.0)
-    ap.add_argument("--threshold", type=float, default=0.3)
+    ap.add_argument("--hi", type=float, default=0.4,
+                    help="Hysteresis seed threshold (keep below the 0.5 fusion plateau)")
+    ap.add_argument("--lo", type=float, default=0.2, help="Hysteresis grow threshold")
+    ap.add_argument("--line-decay-m", type=float, default=500.0,
+                    help="Line-proximity prior decay (m); exp(-line_dist/this)")
     ap.add_argument("--workers", type=int, default=4, help="Concurrent compose cells")
     ap.add_argument("--limit-cells", type=int, default=0)
     ap.add_argument("--tile-deg", type=float, default=2.0, help="Osmose fetch tile size")
@@ -282,11 +311,15 @@ def main():
     cell_ex.shutdown()
     pre_ex.shutdown()
 
-    cands = polygonize_chips(out / "prob", a.threshold)
+    cands = polygonize_chips_v2(out / "prob", lo=a.lo, hi=a.hi)
     if cands.empty:
         log.info("no candidates above threshold"); return
+    cands["confidence"] = cands.conf_max  # ranking score; p90/mean stay as review columns
     cands["area_m2"] = [geodesic_area_m2(g) for g in cands.geometry]
-    cands = cands[cands.area_m2 >= settings.min_sub_area_m2].reset_index(drop=True)
+    # Recall-first: below-floor candidates are flagged and sunk to the bottom of the
+    # review order, not dropped (sindh_test: the hard drop cost 1 of 36 detected
+    # sub-20k-m2 substations for 46 mostly-FP components saved).
+    cands["below_floor"] = cands.area_m2 < settings.min_sub_area_m2
     cu = cands.to_crs(EQ)
     ku = keep.to_crs(EQ)
     dists, n_eps = [], []
@@ -296,12 +329,34 @@ def main():
         n_eps.append(int((ds < a.search_km * 1000).sum()))
     cands["endpoint_dist_m"] = np.round(dists, 1)
     cands["n_endpoints_in_radius"] = n_eps
+    # Line-proximity prior: substations sit ON power lines (sindh_test: 75% of real
+    # hits at line_dist=0, non-hits median 1.8 km; conf*exp(-d/500) lifts AUC
+    # 0.769 -> 0.967, P@20 0.70 -> 0.90). 500 m decay, not the tested-best 250 m,
+    # hedges against incompletely mapped lines in exactly the regions Osmose flags.
+    ext = cands.total_bounds
+    try:
+        power_lines = fetch_power_lines((ext[0] - 0.1, ext[1] - 0.1, ext[2] + 0.1, ext[3] + 0.1))
+    except Exception as e:  # noqa: BLE001 — prior is optional, ranking must not die
+        log.warning("power-line fetch failed (%s); ranking without line prior", e)
+        power_lines = gpd.GeoDataFrame(geometry=[], crs="EPSG:4326")
+    if not power_lines.empty:
+        near = gpd.sjoin_nearest(cu, power_lines.to_crs(EQ)[["geometry"]],
+                                 how="left", distance_col="line_dist_m")
+        near = near[~near.index.duplicated(keep="first")]
+        cands["line_dist_m"] = near["line_dist_m"].round(1).values
+        line_prior = np.exp(-cands.line_dist_m.fillna(0).values / a.line_decay_m)
+    else:
+        cands["line_dist_m"] = np.nan
+        line_prior = 1.0
     cands["rank_score"] = (cands.confidence.fillna(0)
-                           * np.exp(-np.array(dists) / 2000.0)).round(4)
-    cands = cands.sort_values("rank_score", ascending=False).reset_index(drop=True)
+                           * np.exp(-np.array(dists) / 2000.0) * line_prior).round(4)
+    cands = cands.sort_values(["below_floor", "rank_score"],
+                              ascending=[True, False]).reset_index(drop=True)
     cands.to_file(out / "leads.geojson", driver="GeoJSON")
-    log.info("wrote %s: %d leads (%d within %.1f km of an endpoint)",
-             out / "leads.geojson", len(cands),
+    log.info("wrote %s: %d leads (%d below the %d m2 floor, sunk not dropped; "
+             "%d within %.1f km of an endpoint)",
+             out / "leads.geojson", len(cands), int(cands.below_floor.sum()),
+             int(settings.min_sub_area_m2),
              int((cands.endpoint_dist_m < a.search_km * 1000).sum()), a.search_km)
 
 

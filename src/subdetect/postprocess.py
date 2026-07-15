@@ -59,6 +59,71 @@ def polygonize_chips(prob_dir: Path, threshold: float) -> gpd.GeoDataFrame:
     return merged
 
 
+def polygonize_chips_v2(prob_dir: Path, lo: float = 0.2, hi: float = 0.4) -> gpd.GeoDataFrame:
+    """Hysteresis polygonization with robust per-component scores.
+
+    Components are seeded at `hi` and grown through 4-adjacent pixels >= `lo`, so a
+    yard whose interior dips below the old single threshold stays one component and
+    single-pixel flukes below `hi` never seed one. `hi` must stay below 0.5: the
+    S1x(0.5+0.5*S2) fusion caps S1-only detections at exactly 0.5, and a seed
+    threshold at or above that plateau would delete them wholesale.
+
+    Emits per component: conf_max (the legacy score, for comparison), conf_p90
+    (top-decile mean -- robust to isolated hot pixels), conf_mean, n_pixels.
+    Cross-cell merges take the max of conf_max and recombine the means weighted by
+    pixel count (top-decile recombines only approximately).
+    """
+    from scipy import ndimage
+
+    parts = []
+    for tif in tqdm(sorted(prob_dir.glob("*.tif")), desc="polygonize_v2"):
+        with rasterio.open(tif) as src:
+            prob = src.read(1).astype("float32") / 255.0
+            lab, n = ndimage.label(prob >= lo)
+            if n == 0:
+                continue
+            seed_ids = np.unique(lab[prob >= hi])
+            seed_ids = seed_ids[seed_ids != 0]
+            if seed_ids.size == 0:
+                continue
+            keep = np.isin(lab, seed_ids)
+            rows = []
+            for geom, _ in rio_features.shapes(keep.astype("uint8"), mask=keep,
+                                               transform=src.transform):
+                sel = rio_features.geometry_mask([geom], out_shape=prob.shape,
+                                                 transform=src.transform, invert=True)
+                vals = prob[sel]
+                p90 = float(vals[vals >= np.quantile(vals, 0.9)].mean())
+                rows.append((shape(geom), float(vals.max()), p90,
+                             float(vals.mean()), int(vals.size)))
+            if rows:
+                g, cmax, cp90, cmean, npx = zip(*rows)
+                parts.append(gpd.GeoDataFrame(
+                    {"conf_max": cmax, "conf_p90": cp90, "conf_mean": cmean,
+                     "n_pixels": npx},
+                    geometry=list(g), crs=src.crs).to_crs("EPSG:4326"))
+    cols = ["conf_max", "conf_p90", "conf_mean", "n_pixels"]
+    if not parts:
+        return gpd.GeoDataFrame({c: [] for c in cols}, geometry=[], crs="EPSG:4326")
+    gdf = gpd.GeoDataFrame(pd.concat(parts, ignore_index=True), crs="EPSG:4326")
+    u = gdf.union_all()
+    merged = gpd.GeoDataFrame(
+        geometry=list(u.geoms) if u.geom_type == "MultiPolygon" else [u],
+        crs="EPSG:4326",
+    )
+    joined = gpd.sjoin(merged, gdf, how="left", predicate="intersects")
+    w = joined["n_pixels"]
+    agg = (joined.assign(_wp90=joined.conf_p90 * w, _wmean=joined.conf_mean * w)
+           .groupby(joined.index)
+           .agg(conf_max=("conf_max", "max"), n_pixels=("n_pixels", "sum"),
+                _wp90=("_wp90", "sum"), _wmean=("_wmean", "sum")))
+    merged["conf_max"] = agg["conf_max"]
+    merged["n_pixels"] = agg["n_pixels"].astype(int)
+    merged["conf_p90"] = (agg["_wp90"] / agg["n_pixels"]).round(4)
+    merged["conf_mean"] = (agg["_wmean"] / agg["n_pixels"]).round(4)
+    return merged
+
+
 def _grid_prior(aoi: str, cands: gpd.GeoDataFrame, settings: Settings) -> gpd.GeoDataFrame:
     labels_dir = Path("data/labels") / aoi
     lines = load_lines(labels_dir)

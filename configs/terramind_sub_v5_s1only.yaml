@@ -1,0 +1,51 @@
+# v5: S1RTC-only, NO substation size floor (min_area_m2=0 at chip build).
+# Identical arch/loss/schedule to v4; only the chip index changes -- all
+# substation polygons train as class 1 (v4 ignored <20k m2; sindh_test showed
+# 88% of mapped subs are <20k with only 34% pipeline recall). Deliberately
+# retries the pre-2026-07-08 low-floor regime that underfit (v1, IoU_1<=0.11):
+# loss (tuned Tversky), S1 modality, and 3x positives have all changed since.
+# NOTE val masks changed too -- val/mIoU is NOT comparable to v4 numbers;
+# compare via evaluate.py size buckets + scripts/eval_polygonize_v2.py.
+data:
+  index_path: data/chips_v5/combined/index.parquet
+  batch_size: 8
+  num_workers: 4
+  modalities: [S1RTC]
+
+task:
+  model_factory: EncoderDecoderFactory
+  model_args:
+    backbone: terramind_v1_tiny
+    backbone_pretrained: true
+    backbone_modalities: [S1RTC]
+    backbone_bands:
+      S1RTC: [VV, VH]
+    necks:
+      - name: SelectIndices
+        indices: [2, 5, 8, 11]
+      - name: ReshapeTokensToImage
+        remove_cls_token: false
+      - name: LearnedInterpolateToPyramidal
+    decoder: UNetDecoder
+    decoder_channels: [256, 128, 64, 32]
+    num_classes: 2
+    rescale: true
+  loss: tversky
+  tversky_args: {alpha: 0.35, beta: 0.65, gamma: 1.33}
+  class_weights: [0.25, 0.75]
+  ignore_index: -1
+  lr: 1.0e-4
+  optimizer: AdamW
+  optimizer_hparams:
+    weight_decay: 0.05
+  freeze_backbone: false
+  plot_on_val: false
+
+trainer:
+  max_epochs: 60
+  accumulate_grad_batches: 2
+
+checkpoint_dir: data/models/stageA_v5_s1only
+patience: 15
+monitor: val/mIoU
+monitor_mode: max

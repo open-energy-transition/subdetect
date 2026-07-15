@@ -188,10 +188,16 @@ def _split_of(lon: float, lat: float, cfg: dict) -> str:
 
 
 def build_chips(
-    aoi: str, labels_dir: Path, out_dir: Path, limit: int = 0, with_s1: bool = False
+    aoi: str, labels_dir: Path, out_dir: Path, limit: int = 0, with_s1: bool = False,
+    min_area_m2: float | None = None,
 ) -> Path:
+    """`min_area_m2` overrides the settings label floor for TRAINING masks only
+    (0 = every substation polygon becomes class 1, none ignored for size). The
+    settings floor stays authoritative for candidates/eval elsewhere."""
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     settings = Settings.load()
+    if min_area_m2 is not None:
+        settings.min_sub_area_m2 = float(min_area_m2)
     _, cfg = resolve_aoi(aoi, settings)
     out_dir = Path(out_dir) / aoi
     (out_dir / "images").mkdir(parents=True, exist_ok=True)
