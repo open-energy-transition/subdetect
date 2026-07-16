@@ -88,11 +88,18 @@ def run_inference(
     if dual:
         missing = [p for p in comp_idx.index.path
                    if not (Path(p).parent / "composite_s1.tif").exists()]
-        if missing:
+        # A handful of cells outside the current cell-selection (e.g. leftovers from an
+        # earlier ROI) may have S2 but were never targeted by `compose --sensor s1`; skip
+        # them rather than fail the whole run, as long as it's a small fraction.
+        if missing and len(missing) > 0.05 * len(comp_idx.index):
             raise FileNotFoundError(
                 f"{len(missing)} cells missing composite_s1.tif (e.g. {missing[:3]}); "
                 "run compose --sensor s1 first"
             )
+        if missing:
+            log.warning("%d/%d cells missing composite_s1.tif, skipping (e.g. %s)",
+                        len(missing), len(comp_idx.index), missing[:3])
+            comp_idx.index = comp_idx.index[~comp_idx.index.path.isin(missing)]
     out_dir = Path(out_dir) / aoi / "prob"
     out_dir.mkdir(parents=True, exist_ok=True)
     n_bands = len(MODEL_BANDS)

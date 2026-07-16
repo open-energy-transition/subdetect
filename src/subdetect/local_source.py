@@ -93,14 +93,25 @@ def load_substation_labels(labels_dir: Path, min_area_m2: float = 1000.0) -> gpd
     - role="small" substation polygon <  min_area_m2  -> ignore (-1)
     - role="node"  power=substation node              -> ignore disc (-1)
     - role="plant" power=plant polygon                -> ignore (-1)
+
+    Prefers `substations_poly_refined.parquet` (see label_refine.py) over the raw
+    `substations_poly.parquet` when present: refined geometries are tighter (S1+NDVI
+    shrunk), and polygons flagged `status=no_signal` (no S1 backscatter evidence of
+    real infrastructure anywhere inside them) are always demoted to role="small"
+    regardless of area, since the OSM way likely doesn't cover real transmission-class
+    equipment at all.
     """
     labels_dir = Path(labels_dir)
     parts = []
 
-    subs = gpd.read_parquet(labels_dir / "substations_poly.parquet")
+    refined_p = labels_dir / "substations_poly_refined.parquet"
+    subs = gpd.read_parquet(refined_p if refined_p.exists() else labels_dir / "substations_poly.parquet")
     if "area_m2" not in subs.columns:
         subs["area_m2"] = [geodesic_area_m2(g) for g in subs.geometry]
-    subs = subs.assign(role=np.where(subs.area_m2 >= min_area_m2, "pos", "small"))
+    role = np.where(subs.area_m2 >= min_area_m2, "pos", "small")
+    if "status" in subs.columns:
+        role = np.where(subs.status == "no_signal", "small", role)
+    subs = subs.assign(role=role)
     parts.append(subs[["geometry", "area_m2", "voltage_v", "role"]])
 
     node_p = labels_dir / "substations_node.parquet"

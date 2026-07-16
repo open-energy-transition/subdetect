@@ -1,0 +1,56 @@
+# v6: S1RTC-only, trained on refined labels + Yunnan hard negatives.
+# Identical arch/loss/schedule/no-floor regime to v5_s1only; two changes to the data:
+#  1. Pakistan + india_pilot substation polygons pass through label_refine.py first
+#     (S1-existence + NDVI-core shrink, compactness-guarded) instead of the raw OSM
+#     ways -- drops 13 no-signal Pakistan + 22 no-signal India polygons entirely and
+#     tightens 30 Pakistan + 447 India oversized ones that were burning farmland/
+#     property as class-1.
+#  2. yunnan_hardneg (260 chips, mined from the Yunnan osmose pilot's low-confidence
+#     leads) is folded into the combined index -- deliberately left out of v5 to keep
+#     that a single-variable test against v4; now added since the architecture
+#     question (S1-only vs fusion) is settled.
+# Compare via evaluate.py size buckets + scripts/eval_polygonize_v2.py against
+# v5_s1only, NOT raw val/mIoU (val masks changed under the refined labels).
+data:
+  index_path: data/chips_v6/combined/index.parquet
+  batch_size: 8
+  num_workers: 4
+  modalities: [S1RTC]
+
+task:
+  model_factory: EncoderDecoderFactory
+  model_args:
+    backbone: terramind_v1_tiny
+    backbone_pretrained: true
+    backbone_modalities: [S1RTC]
+    backbone_bands:
+      S1RTC: [VV, VH]
+    necks:
+      - name: SelectIndices
+        indices: [2, 5, 8, 11]
+      - name: ReshapeTokensToImage
+        remove_cls_token: false
+      - name: LearnedInterpolateToPyramidal
+    decoder: UNetDecoder
+    decoder_channels: [256, 128, 64, 32]
+    num_classes: 2
+    rescale: true
+  loss: tversky
+  tversky_args: {alpha: 0.35, beta: 0.65, gamma: 1.33}
+  class_weights: [0.25, 0.75]
+  ignore_index: -1
+  lr: 1.0e-4
+  optimizer: AdamW
+  optimizer_hparams:
+    weight_decay: 0.05
+  freeze_backbone: false
+  plot_on_val: false
+
+trainer:
+  max_epochs: 60
+  accumulate_grad_batches: 2
+
+checkpoint_dir: data/models/stageA_v6_s1only
+patience: 15
+monitor: val/mIoU
+monitor_mode: max

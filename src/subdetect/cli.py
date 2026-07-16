@@ -21,6 +21,18 @@ def osm(
 
 
 @app.command()
+def refine_labels(
+    aoi: str = typer.Option(..., help="AOI name (e.g. pakistan)"),
+    labels_dir: Path = typer.Option(Path("data/labels")),
+    composites_dir: Path = typer.Option(Path("data/composites")),
+) -> None:
+    """Shrink oversized substation polygons using S1 existence + S2 NDVI evidence."""
+    from subdetect.label_refine import refine_labels as _refine
+
+    _refine(aoi=aoi, labels_dir=labels_dir, composites_dir=composites_dir)
+
+
+@app.command()
 def roi(
     aoi: str = typer.Option(..., help="AOI name (e.g. pakistan)"),
     radius_km: float = typer.Option(20.0, help="ROI buffer radius around lines/substations"),
