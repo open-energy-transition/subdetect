@@ -1,0 +1,143 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="980" height="740" viewBox="0 0 980 740" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#5b6470"/>
+    </marker>
+    <marker id="arrowAmber" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#b45309"/>
+    </marker>
+  </defs>
+  <rect width="980" height="740" fill="#ffffff"/>
+  <text x="30" y="34" font-size="19" font-weight="700" fill="#111827">subdetect &#8212; substation detection pipeline</text>
+  <text x="30" y="54" font-size="12" fill="#6b7280">OSM-guided training &#183; dual-arm TerraMind segmentation &#183; decision fusion &#183; prior-ranked leads &#183; field-evaluation feedback loop</text>
+
+  <!-- ============ row 1: sources ============ -->
+  <text x="30" y="86" font-size="11" font-weight="700" fill="#9ca3af" letter-spacing="1">SOURCES</text>
+  <g font-size="12" fill="#111827">
+    <rect x="30"  y="96" width="200" height="52" rx="8" fill="#f3f4f6" stroke="#9ca3af"/>
+    <text x="130" y="117" text-anchor="middle" font-weight="600">OpenStreetMap</text>
+    <text x="130" y="134" text-anchor="middle" font-size="10.5" fill="#4b5563">substations &#183; lines &#183; towers &#183; settlements</text>
+
+    <rect x="250" y="96" width="150" height="52" rx="8" fill="#f3f4f6" stroke="#9ca3af"/>
+    <text x="325" y="117" text-anchor="middle" font-weight="600">Sentinel-2 L2A</text>
+    <text x="325" y="134" text-anchor="middle" font-size="10.5" fill="#4b5563">optical, 10 m</text>
+
+    <rect x="420" y="96" width="150" height="52" rx="8" fill="#f3f4f6" stroke="#9ca3af"/>
+    <text x="495" y="117" text-anchor="middle" font-weight="600">Sentinel-1 RTC</text>
+    <text x="495" y="134" text-anchor="middle" font-size="10.5" fill="#4b5563">radar VV/VH, 10 m</text>
+
+    <rect x="590" y="96" width="175" height="52" rx="8" fill="#f3f4f6" stroke="#9ca3af"/>
+    <text x="677" y="117" text-anchor="middle" font-weight="600">TorchGeo Substation ds</text>
+    <text x="677" y="134" text-anchor="middle" font-size="10.5" fill="#4b5563">26k global S2 chips</text>
+
+    <rect x="785" y="96" width="165" height="52" rx="8" fill="#f3f4f6" stroke="#9ca3af"/>
+    <text x="867" y="117" text-anchor="middle" font-weight="600">VIDA buildings</text>
+    <text x="867" y="134" text-anchor="middle" font-size="10.5" fill="#4b5563">Google+MS footprints</text>
+  </g>
+
+  <!-- ============ row 2: prepare ============ -->
+  <text x="30" y="188" font-size="11" font-weight="700" fill="#9ca3af" letter-spacing="1">PREPARE</text>
+  <g font-size="12" fill="#111827">
+    <rect x="30" y="198" width="200" height="56" rx="8" fill="#eef2ff" stroke="#818cf8"/>
+    <text x="130" y="219" text-anchor="middle" font-weight="600">ROI cells + composites</text>
+    <text x="130" y="236" text-anchor="middle" font-size="10.5" fill="#4b5563">grid-corridor buffer</text>
+    <text x="130" y="248" text-anchor="middle" font-size="10.5" fill="#4b5563">S2 / S1 median mosaics</text>
+
+    <rect x="250" y="198" width="320" height="56" rx="8" fill="#eef2ff" stroke="#818cf8"/>
+    <text x="410" y="219" text-anchor="middle" font-weight="600">training chips + hard negatives</text>
+    <text x="410" y="236" text-anchor="middle" font-size="10.5" fill="#4b5563">masks burned from OSM labels</text>
+    <text x="410" y="248" text-anchor="middle" font-size="10.5" fill="#4b5563">villages &#183; construction &#183; cities &#183; water as background</text>
+  </g>
+
+  <!-- ============ row 3: train ============ -->
+  <text x="30" y="290" font-size="11" font-weight="700" fill="#9ca3af" letter-spacing="1">TRAIN</text>
+  <g font-size="12" fill="#111827">
+    <rect x="70" y="300" width="215" height="56" rx="8" fill="#dbeafe" stroke="#3b82f6"/>
+    <text x="177" y="322" text-anchor="middle" font-weight="600">S1 arm &#8212; TerraMind U-Net</text>
+    <text x="177" y="339" text-anchor="middle" font-size="10.5" fill="#4b5563">radar: metal / structure evidence</text>
+
+    <rect x="315" y="300" width="215" height="56" rx="8" fill="#dbeafe" stroke="#3b82f6"/>
+    <text x="422" y="322" text-anchor="middle" font-weight="600">S2 arm &#8212; TerraMind U-Net</text>
+    <text x="422" y="339" text-anchor="middle" font-size="10.5" fill="#4b5563">optical: yard appearance</text>
+  </g>
+
+  <!-- ============ row 4: infer + fuse ============ -->
+  <text x="30" y="398" font-size="11" font-weight="700" fill="#9ca3af" letter-spacing="1">INFER + FUSE</text>
+  <g font-size="12" fill="#111827">
+    <rect x="70" y="408" width="460" height="52" rx="8" fill="#dbeafe" stroke="#3b82f6"/>
+    <text x="300" y="429" text-anchor="middle" font-weight="600">tiled inference: per-arm probability rasters</text>
+    <text x="300" y="446" text-anchor="middle" font-size="10.5" fill="#4b5563">224 px Hann-blended windows over every ROI cell</text>
+
+    <rect x="70" y="482" width="460" height="46" rx="8" fill="#dbeafe" stroke="#3b82f6"/>
+    <text x="300" y="502" text-anchor="middle" font-weight="600">decision fusion: mean of the two arms</text>
+    <text x="300" y="518" text-anchor="middle" font-size="10.5" fill="#4b5563">(p_S1 + p_S2) / 2 &#8212; both arms retained per cell</text>
+  </g>
+
+  <!-- ============ row 5: rank + export ============ -->
+  <text x="30" y="572" font-size="11" font-weight="700" fill="#9ca3af" letter-spacing="1">RANK + EXPORT</text>
+  <g font-size="12" fill="#111827">
+    <rect x="30" y="582" width="215" height="56" rx="8" fill="#eef2ff" stroke="#818cf8"/>
+    <text x="137" y="604" text-anchor="middle" font-weight="600">polygonize candidates</text>
+    <text x="137" y="621" text-anchor="middle" font-size="10.5" fill="#4b5563">hysteresis threshold &#183; area floor</text>
+
+    <rect x="275" y="582" width="285" height="56" rx="8" fill="#eef2ff" stroke="#818cf8"/>
+    <text x="417" y="600" text-anchor="middle" font-weight="600">priors + vetoes</text>
+    <text x="417" y="615" text-anchor="middle" font-size="10.5" fill="#4b5563">line &#183; mapped-tower &#183; isolated-S1-tower priors</text>
+    <text x="417" y="629" text-anchor="middle" font-size="10.5" fill="#4b5563">urban + building-fill flags (OSM, VIDA)</text>
+
+    <rect x="590" y="582" width="200" height="56" rx="8" fill="#dcfce7" stroke="#22c55e"/>
+    <text x="690" y="604" text-anchor="middle" font-weight="600">new-lead files</text>
+    <text x="690" y="621" text-anchor="middle" font-size="10.5" fill="#4b5563">GeoParquet &#183; GeoJSON &#183; MapRoulette</text>
+  </g>
+
+  <!-- ============ evaluate loop ============ -->
+  <g font-size="12" fill="#111827">
+    <rect x="620" y="408" width="330" height="120" rx="8" fill="#fef3c7" stroke="#f59e0b"/>
+    <text x="785" y="432" text-anchor="middle" font-weight="700">EVALUATE</text>
+    <text x="785" y="452" text-anchor="middle" font-size="10.5" fill="#4b5563">field_eval on a fixed real region (sindh_test)</text>
+    <text x="785" y="467" text-anchor="middle" font-size="10.5" fill="#4b5563">vs raw OSM ground truth &#8212; comparable across runs</text>
+    <text x="785" y="490" text-anchor="middle" font-size="10.5" fill="#4b5563">+ human validation of exported leads in the</text>
+    <text x="785" y="505" text-anchor="middle" font-size="10.5" fill="#4b5563">OSM editor: new false-positive classes</text>
+  </g>
+
+  <!-- ============ edges ============ -->
+  <g stroke="#5b6470" stroke-width="1.6" fill="none" marker-end="url(#arrow)">
+    <!-- sources -> prepare -->
+    <path d="M 130 148 L 130 194"/>
+    <path d="M 300 148 C 300 172 220 168 196 194"/>
+    <path d="M 495 148 C 495 170 300 166 240 218"/>
+    <path d="M 677 148 L 500 196"/>
+    <!-- composites -> chips -->
+    <path d="M 230 226 L 246 226"/>
+    <!-- OSM lines/towers also feed priors: left rail to priors bottom -->
+    <path d="M 30 122 C 6 122 6 700 180 700 L 375 700 C 388 700 391 692 391 642"/>
+    <!-- VIDA -> vetoes: right rail under everything to priors bottom -->
+    <path d="M 867 148 C 968 260 968 700 660 700 L 460 700 C 447 700 444 692 444 642"/>
+    <!-- chips -> arms -->
+    <path d="M 340 254 L 212 296"/>
+    <path d="M 428 254 L 424 296"/>
+    <!-- composites -> tiled inference (left of S1 arm box) -->
+    <path d="M 100 254 C 52 300 52 366 140 412"/>
+    <!-- train -> infer -->
+    <path d="M 177 356 L 250 404"/>
+    <path d="M 422 356 L 350 404"/>
+    <!-- infer -> fusion -->
+    <path d="M 300 460 L 300 478"/>
+    <!-- fusion -> polygonize -->
+    <path d="M 170 528 L 140 578"/>
+    <!-- polygonize -> priors -->
+    <path d="M 245 610 L 271 610"/>
+    <!-- priors -> leads -->
+    <path d="M 560 610 L 586 610"/>
+    <!-- fusion -> evaluate -->
+    <path d="M 530 505 L 616 490"/>
+  </g>
+  <g stroke="#b45309" stroke-width="1.6" fill="none" marker-end="url(#arrowAmber)" stroke-dasharray="5 4">
+    <!-- leads -> evaluate (human validation) -->
+    <path d="M 720 578 L 760 532"/>
+    <!-- evaluate -> hard negatives (feedback), routed right of the S2 arm box -->
+    <path d="M 700 408 C 700 300 650 240 576 228"/>
+  </g>
+  <text x="712" y="295" font-size="10.5" fill="#b45309" text-anchor="start">validated FP classes become</text>
+  <text x="712" y="309" font-size="10.5" fill="#b45309" text-anchor="start">new hard-negative chips</text>
+</svg>

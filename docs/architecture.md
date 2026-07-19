@@ -4,6 +4,13 @@ title: Architecture
 
 # Architecture
 
+![High-level processing pipeline: sources, prepare, train, infer+fuse, rank+export, and the evaluation feedback loop](assets/pipeline.svg)
+
+The flow chart above is the high-level abstraction of the whole system — data
+sources through dual-arm training, decision fusion, prior-based ranking, and the
+field-evaluation loop that feeds validated false positives back in as hard
+negatives. The diagram below zooms into how the code is organized around it.
+
 ![Pipeline architecture: core CLI plus the Osmose regional side-path](assets/architecture.svg)
 
 subdetect has two entry points into the same underlying machinery: a **core CLI**
