@@ -39,11 +39,17 @@ def _load_s1(path: str) -> np.ndarray:
 
 
 class SubChipDataset(Dataset):
-    def __init__(self, index: pd.DataFrame, modalities: list[str], augment: bool = False):
+    def __init__(self, index: pd.DataFrame, modalities: list[str], augment: bool = False,
+                 upsample: int = 1):
         self.index = index.reset_index(drop=True)
         self.modalities = modalities
         self.dual = "S1RTC" in modalities
         self.augment = augment
+        # upsample > 1: bicubic-upsample inputs (nearest for the mask) so a small
+        # substation spans more ViT tokens. Adds no information -- it attacks the
+        # token-granularity limit (one 16 px patch = 160 m at native 10 m, bigger
+        # than most small substations). See the v12 config header.
+        self.upsample = upsample
 
     def __len__(self) -> int:
         return len(self.index)
@@ -69,13 +75,23 @@ class SubChipDataset(Dataset):
                 if s1 is not None:
                     s1 = s1[:, :, ::-1].copy()
 
-        mask_t = torch.from_numpy(mask)
+        s2_t, mask_t = torch.from_numpy(s2), torch.from_numpy(mask)
+        s1_t = torch.from_numpy(s1) if s1 is not None else None
+        if self.upsample > 1:
+            f = float(self.upsample)
+            s2_t = torch.nn.functional.interpolate(
+                s2_t[None], scale_factor=f, mode="bicubic", align_corners=False)[0]
+            if s1_t is not None:
+                s1_t = torch.nn.functional.interpolate(
+                    s1_t[None], scale_factor=f, mode="bilinear", align_corners=False)[0]
+            mask_t = torch.nn.functional.interpolate(
+                mask_t[None, None].float(), scale_factor=f, mode="nearest")[0, 0].long()
         if self.dual:
-            img = {"S1RTC": torch.from_numpy(s1)}
+            img = {"S1RTC": s1_t}
             if "S2L2A" in self.modalities:
-                img["S2L2A"] = torch.from_numpy(s2)
+                img["S2L2A"] = s2_t
             return {"image": img, "mask": mask_t}
-        return {"image": torch.from_numpy(s2), "mask": mask_t}
+        return {"image": s2_t, "mask": mask_t}
 
 
 class SubDataModule(LightningDataModule):
@@ -86,6 +102,7 @@ class SubDataModule(LightningDataModule):
         num_workers: int = 4,
         modalities: list[str] | None = None,
         min_val_chips: int = 8,
+        upsample: int = 1,
     ):
         super().__init__()
         self.index_path = Path(index_path)
@@ -93,6 +110,7 @@ class SubDataModule(LightningDataModule):
         self.num_workers = num_workers
         self.modalities = modalities or ["S2L2A"]
         self.min_val_chips = min_val_chips
+        self.upsample = upsample
 
     def setup(self, stage: str | None = None) -> None:
         index = pd.read_parquet(self.index_path)
@@ -101,8 +119,9 @@ class SubDataModule(LightningDataModule):
         if len(val) < self.min_val_chips:
             val = train.sample(frac=0.2, random_state=42)
             train = train.drop(val.index)
-        self.train_ds = SubChipDataset(train, self.modalities, augment=True)
-        self.val_ds = SubChipDataset(val, self.modalities)
+        self.train_ds = SubChipDataset(train, self.modalities, augment=True,
+                                       upsample=self.upsample)
+        self.val_ds = SubChipDataset(val, self.modalities, upsample=self.upsample)
 
     def train_dataloader(self) -> DataLoader:
         return DataLoader(self.train_ds, batch_size=self.batch_size, shuffle=True,
