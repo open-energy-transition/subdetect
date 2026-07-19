@@ -61,19 +61,33 @@ def _jitter(lon: float, lat: float, rng: np.random.Generator, m: float = 900.0) 
 
 def sample_chip_centers(
     labels: gpd.GeoDataFrame, lines: gpd.GeoDataFrame, coverage,
-    rng: np.random.Generator, min_area: float, limit: int,
+    rng: np.random.Generator, min_area: float, limit: int, voltage_weight: int = 1,
 ) -> pd.DataFrame:
+    """`voltage_weight > 1` oversamples substations with a valid OSM voltage tag: each
+    tagged polygon gets `voltage_weight` jittered positive chips instead of 1, giving them
+    more representation in training without excluding untagged substations outright (which
+    caused severe data-starvation regression when tried -- see conversation/memory)."""
     pos_polys = labels[(labels.role == "pos")]
     rows = []
     for _, r in pos_polys.iterrows():
         c = r.geometry.centroid
         lon, lat = _jitter(c.x, c.y, rng)
-        rows.append((lon, lat, "positive"))
-    pos = pd.DataFrame(rows, columns=["lon", "lat", "kind"])
+        tagged = bool(pd.notna(r.voltage_v) and r.voltage_v > 0)
+        rows.append((lon, lat, "positive", tagged))
+    pos = pd.DataFrame(rows, columns=["lon", "lat", "kind", "tagged"])
     if not pos.empty:
         cell = (pos.lon / 0.02).round().astype(int).astype(str) + "_" + (
             pos.lat / 0.02).round().astype(int).astype(str)
         pos = pos.loc[~cell.duplicated()].reset_index(drop=True)
+    if voltage_weight > 1 and not pos.empty:
+        extra = []
+        for _, r in pos[pos.tagged].iterrows():
+            for _ in range(voltage_weight - 1):
+                lon, lat = _jitter(r.lon, r.lat, rng, m=300.0)
+                extra.append((lon, lat, "positive", True))
+        if extra:
+            pos = pd.concat([pos, pd.DataFrame(extra, columns=pos.columns)], ignore_index=True)
+    pos = pos.drop(columns="tagged")
     n_pos = max(len(pos), 1)
 
     # Line negatives: vertices of lines densified to LINE_NEG_SPACING_M, kept only where
@@ -189,11 +203,19 @@ def _split_of(lon: float, lat: float, cfg: dict) -> str:
 
 def build_chips(
     aoi: str, labels_dir: Path, out_dir: Path, limit: int = 0, with_s1: bool = False,
-    min_area_m2: float | None = None,
+    min_area_m2: float | None = None, prefer_refined: bool = True, voltage_only: bool = False,
+    voltage_weight: int = 1,
 ) -> Path:
     """`min_area_m2` overrides the settings label floor for TRAINING masks only
     (0 = every substation polygon becomes class 1, none ignored for size). The
-    settings floor stays authoritative for candidates/eval elsewhere."""
+    settings floor stays authoritative for candidates/eval elsewhere.
+
+    `prefer_refined=False` forces raw (unrefined) OSM labels even if a refined parquet
+    exists, for a clean baseline comparison. `voltage_only=True` restricts positive
+    supervision to substations with a valid OSM `voltage` tag (see
+    `local_source.load_substation_labels`). `voltage_weight` oversamples voltage-tagged
+    substations at the chip level instead (see `sample_chip_centers`) -- the less
+    destructive alternative to `voltage_only`, which starved the training set."""
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     settings = Settings.load()
     if min_area_m2 is not None:
@@ -214,7 +236,8 @@ def build_chips(
     coverage = comp_idx.coverage
 
     labels_dir = Path(labels_dir) / aoi
-    labels = load_substation_labels(labels_dir, min_area_m2=settings.min_sub_area_m2)
+    labels = load_substation_labels(labels_dir, min_area_m2=settings.min_sub_area_m2,
+                                     prefer_refined=prefer_refined, voltage_only=voltage_only)
     labels = labels[labels.geometry.centroid.within(coverage)].reset_index(drop=True)
     lines = load_lines(labels_dir)
     lines = lines[lines.geometry.intersects(coverage)].reset_index(drop=True)
@@ -222,7 +245,8 @@ def build_chips(
              len(comp_idx.index), labels.role.value_counts().to_dict(), len(lines))
 
     rng = np.random.default_rng(42)
-    centers = sample_chip_centers(labels, lines, coverage, rng, settings.min_sub_area_m2, limit)
+    centers = sample_chip_centers(labels, lines, coverage, rng, settings.min_sub_area_m2, limit,
+                                   voltage_weight=voltage_weight)
     log.info("Sampling %d chips (%s)%s", len(centers), centers.kind.value_counts().to_dict(),
              " with S1" if with_s1 else "")
     n_bands = len(MODEL_BANDS)

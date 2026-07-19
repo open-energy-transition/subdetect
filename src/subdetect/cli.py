@@ -70,12 +70,19 @@ def chips(
     s1: bool = typer.Option(False, "--s1", help="Also write co-registered S1 chips (needs S1 composites)"),
     min_area_m2: float = typer.Option(
         None, help="Override the label floor for training masks (0 = no size floor)"),
+    prefer_refined: bool = typer.Option(
+        True, help="Use substations_poly_refined.parquet when present (--no-prefer-refined forces raw labels)"),
+    voltage_only: bool = typer.Option(
+        False, help="Only train on substations with a valid OSM voltage tag"),
+    voltage_weight: int = typer.Option(
+        1, help="Oversample voltage-tagged substations by this factor (chip-level, keeps untagged ones)"),
 ) -> None:
     """Sample training chips: composite windows + burned substation masks."""
     from subdetect.chips import build_chips
 
     build_chips(aoi=aoi, labels_dir=labels_dir, out_dir=out_dir, limit=limit, with_s1=s1,
-                min_area_m2=min_area_m2)
+                min_area_m2=min_area_m2, prefer_refined=prefer_refined, voltage_only=voltage_only,
+                voltage_weight=voltage_weight)
 
 
 @app.command()

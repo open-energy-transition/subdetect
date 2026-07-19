@@ -7,7 +7,13 @@ For a country/state/province (Osmose country code):
   3. Select all 0.1 deg cells within --search-km (default 10 km) of a surviving endpoint.
   4. Compose Sentinel-2 + Sentinel-1 dry-season composites for those cells (resumable).
   5. Tiled dual-model inference with the established best stack:
-     P = P_S1only * (0.5 + 0.5 * P_S2only)   (soft optical gate, val IoU 0.345)
+     P = P_S1only * (0.5 + 0.5 * P_S2only)   (soft optical gate; re-validated on the
+     v5 s1only/s2only arms via scripts/eval_decision_fusion.py: bestIoU 0.238 @ thr 0.3,
+     recall>=20k 15/18 on pakistan val. NOTE: plain "mean" fusion scored higher
+     (bestIoU 0.254 @ thr 0.5, same 15/18 recall) on the same v5 arms -- not yet
+     adopted here because the seed/grow hysteresis below was tuned around s1_gated's
+     0.5 plateau property, so switching formulas needs a field re-validation pass
+     first, not just a val-chip check.)
   6. Polygonize with hysteresis (seed 0.4, grow 0.2 -- seed kept below the 0.5
      fusion plateau so S1-only detections survive; validated on sindh_test +
      yunnan pilot vs the old single 0.3 threshold: fewer fragments, +1 recovered
@@ -52,8 +58,8 @@ OSMOSE_API = "https://osmose.openstreetmap.fr/api/0.3/issues"
 OVERPASS_API = "https://overpass-api.de/api/interpreter"
 UA = {"User-Agent": "subdetect-osmose-detect/0.1 (OpenEnergyTransition; substation mapping research)"}
 EQ = "EPSG:6933"
-S1_CKPT = "data/models/stageA_v4_s1only/terramind-sub-epoch=15-step=1376.ckpt"
-S2_CKPT = "data/models/stageA_v4_s2only/terramind-sub-epoch=23-step=2064.ckpt"
+S1_CKPT = "data/models/stageA_v5_s1only/terramind-sub-epoch=24-step=6975.ckpt"
+S2_CKPT = "data/models/stageA_v5_s2only/terramind-sub-epoch=40-step=11439.ckpt"
 WIN = 224
 
 

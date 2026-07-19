@@ -37,6 +37,23 @@ _S1_MEAN = np.array(S1_MEAN, dtype="float32")[:, None, None]
 _S1_STD = np.array(S1_STD, dtype="float32")[:, None, None]
 
 
+def auc(scores: np.ndarray, y: np.ndarray) -> float:
+    """Mann-Whitney AUC: P(score of random positive > score of random negative)."""
+    from scipy.stats import rankdata
+
+    n_pos, n_neg = int(y.sum()), int((~y).sum())
+    if n_pos == 0 or n_neg == 0:
+        return float("nan")
+    r = rankdata(scores)
+    return float((r[y].sum() - n_pos * (n_pos + 1) / 2) / (n_pos * n_neg))
+
+
+def precision_at(scores: np.ndarray, y: np.ndarray, k: int) -> float:
+    order = np.argsort(-scores, kind="stable")
+    top = order[: min(k, len(order))]
+    return float(y[top].mean()) if len(top) else float("nan")
+
+
 def _load_s1(path: str) -> np.ndarray:
     with rasterio.open(path) as src:
         dn = src.read().astype("float32")

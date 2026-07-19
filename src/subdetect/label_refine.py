@@ -17,6 +17,13 @@ training masks. Two independent signals fix this:
   good 500kV substations, which score core_frac 0.16/0.42 despite being tightly
   drawn). NDVI is the actual boundary signal; S1 only gates whether refinement
   should run at all.
+- **OSM building-density gate**: village rooftops also produce strong S1 double-bounce
+  and can pass the existence check as convincingly as real switchyard equipment (caught
+  by inspecting a "refined" village example whose shrunk core tracked building rooftops,
+  not a substation -- see conversation/memory). Fetched per-polygon-window via Overpass
+  (small bbox, cheap); if mapped building footprints cover more than
+  `BUILDING_FRAC_MAX` of the S1 core, the existence signal isn't trusted at all --
+  flag `status=village` and leave the polygon untouched, same as `no_signal`/`fragmented`.
 
 Only ever shrinks (refined = original polygon INTERSECT non-vegetated core anchored
 to the S1 hotspot), never grows a polygon beyond what OSM drew.
@@ -25,13 +32,16 @@ to the S1 hotspot), never grows a polygon beyond what OSM drew.
 from __future__ import annotations
 
 import logging
+import time
 from pathlib import Path
 
 import geopandas as gpd
 import numpy as np
+import pandas as pd
+import requests
 from rasterio import features as rio_features
 from scipy import ndimage
-from shapely.geometry import shape
+from shapely.geometry import Polygon, shape
 from shapely.ops import unary_union
 
 from subdetect.config import S1_OFFSET_DB, S1_SCALE, Settings, geodesic_area_m2
@@ -47,6 +57,10 @@ KEEP_RATIO = 0.9       # refined/original area >= this -> not worth changing, ke
 COMPACTNESS_MIN = 0.7  # largest connected piece must be this fraction of the refined core,
                        # else it's scattered bare patches (fallow fields, village rooftops)
                        # rather than one structure -- skip refinement, flag for review
+BUILDING_FRAC_MAX = 0.3  # S1 core overlapping mapped buildings above this -> don't trust
+                         # the existence signal (village, not substation)
+OVERPASS_API = "https://overpass-api.de/api/interpreter"
+UA = {"User-Agent": "subdetect-label-refine/0.1 (OpenEnergyTransition; substation mapping research)"}
 
 
 def _window_bbox(geom, pad_frac: float = 0.5, pad_deg: float = 0.0015) -> tuple[float, float, float, float]:
@@ -88,6 +102,56 @@ def _s1_core_mask(arr, transform, geom_proj):
     return core, poly_mask
 
 
+def _fetch_buildings(bbox: tuple[float, float, float, float], retries: int = 4) -> list:
+    """OSM building footprints (way["building"]) in bbox as polygons, EPSG:4326.
+    Retries with backoff on 429/504 (the public Overpass instance rate-limits/times out
+    under the ~800 sequential per-polygon calls a full refine run makes). Returns [] after
+    exhausting retries -- the guard degrades to "no data, don't block" rather than dying
+    the whole refinement run over a flaky public endpoint.
+    """
+    q = f"""[out:json][timeout:30];
+    way["building"]({bbox[1]},{bbox[0]},{bbox[3]},{bbox[2]});
+    out geom;"""
+    delay = 1.0
+    for attempt in range(retries):
+        try:
+            r = requests.post(OVERPASS_API, data={"data": q}, headers=UA, timeout=45)
+            if r.status_code in (429, 504) and attempt < retries - 1:
+                time.sleep(delay)
+                delay *= 3
+                continue
+            r.raise_for_status()
+            polys = []
+            for el in r.json().get("elements", []):
+                coords = [(p["lon"], p["lat"]) for p in el.get("geometry", [])]
+                if len(coords) >= 4:
+                    polys.append(Polygon(coords))
+            time.sleep(1.0)  # be polite to the public Overpass instance across ~800 calls
+            return polys
+        except Exception as e:  # noqa: BLE001 -- optional guard, must not kill the run
+            if attempt < retries - 1:
+                time.sleep(delay)
+                delay *= 3
+                continue
+            log.warning("building fetch failed for bbox %s (%s); skipping building guard", bbox, e)
+            return []
+    return []
+
+
+def _building_frac(core: np.ndarray, transform, crs, bbox) -> float:
+    """Fraction of `core` pixels that fall under a mapped OSM building footprint."""
+    polys = _fetch_buildings(bbox)
+    if not polys:
+        return 0.0
+    bgdf = gpd.GeoDataFrame(geometry=polys, crs="EPSG:4326").to_crs(crs)
+    bmask = rio_features.geometry_mask(
+        [g.__geo_interface__ for g in bgdf.geometry if g is not None and not g.is_empty],
+        out_shape=core.shape, transform=transform, invert=True,
+    )
+    core_px = int(core.sum())
+    return float((core & bmask).sum() / core_px) if core_px else 0.0
+
+
 def refine_one(idx: CompositeIndex, geom) -> dict:
     """Refine a single substation polygon (EPSG:4326). Returns a result dict."""
     bbox = _window_bbox(geom)
@@ -106,6 +170,12 @@ def refine_one(idx: CompositeIndex, geom) -> dict:
         return dict(status="no_bg", geometry=geom, orig_area_m2=orig_area_m2, refined_area_m2=None)
     if core.sum() == 0:
         return dict(status="no_signal", geometry=geom, orig_area_m2=orig_area_m2, refined_area_m2=0.0)
+
+    if _building_frac(core, transform, crs, bbox) > BUILDING_FRAC_MAX:
+        # Village rooftops backscatter as strongly as switchyard equipment -- the
+        # existence signal itself isn't trustworthy here, don't attempt to shrink onto it.
+        return dict(status="village", geometry=geom, orig_area_m2=orig_area_m2,
+                    refined_area_m2=orig_area_m2)
 
     # NDVI on the co-registered S2 window.
     s2_res = idx.read_window(bbox, "composite_0.tif")
@@ -167,31 +237,54 @@ def refine_labels(aoi: str, labels_dir: Path = Path("data/labels"),
     table (all roles) with `status`, `orig_area_m2`, `refined_area_m2` columns added; only
     rows that were actually refined get a replaced geometry. Writes
     `<labels_dir>/<aoi>/substations_poly_refined.parquet` (does not touch the input file).
+
+    Resumable: each row's result is cached to `<labels_dir>/<aoi>/.refine_cache.parquet`
+    as it completes, so a killed run (the building-density gate adds ~1 Overpass call per
+    checked polygon, taking minutes) picks back up instead of repeating finished network
+    calls. Delete the cache file to force a full recompute.
     """
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     settings = Settings.load()
-    subs = gpd.read_parquet(Path(labels_dir) / aoi / "substations_poly.parquet")
+    aoi_dir = Path(labels_dir) / aoi
+    subs = gpd.read_parquet(aoi_dir / "substations_poly.parquet")
     if "area_m2" not in subs.columns:
         subs["area_m2"] = [geodesic_area_m2(g) for g in subs.geometry]
 
+    cache_path = aoi_dir / ".refine_cache.parquet"
+    cache = gpd.read_parquet(cache_path) if cache_path.exists() else gpd.GeoDataFrame(
+        columns=["status", "orig_area_m2", "refined_area_m2", "geometry"], geometry="geometry")
+    done = set(cache.index)
+    if done:
+        log.info("resuming: %d/%d rows already cached", len(done), len(subs))
+
     idx = CompositeIndex(Path(composites_dir) / aoi)
     big = subs.area_m2 >= settings.min_sub_area_m2
-    results = []
-    for i, row in subs.iterrows():
-        if not big.loc[i]:
-            results.append(dict(status="unchecked", geometry=row.geometry,
-                                orig_area_m2=row.area_m2, refined_area_m2=row.area_m2))
+    cache_records = {i: cache.loc[i].to_dict() for i in done}
+    for n, (i, row) in enumerate(subs.iterrows()):
+        if i in cache_records:
             continue
-        results.append(refine_one(idx, row.geometry))
+        if not big.loc[i]:
+            r = dict(status="unchecked", geometry=row.geometry,
+                      orig_area_m2=row.area_m2, refined_area_m2=row.area_m2)
+        else:
+            r = refine_one(idx, row.geometry)
+        cache_records[i] = r
+        if (n + 1) % 20 == 0 or n == len(subs) - 1:
+            gpd.GeoDataFrame(pd.DataFrame(cache_records).T, geometry="geometry",
+                              crs="EPSG:4326").to_parquet(cache_path)
+            log.info("checked %d/%d", n + 1, len(subs))
+    gpd.GeoDataFrame(pd.DataFrame(cache_records).T, geometry="geometry",
+                      crs="EPSG:4326").to_parquet(cache_path)
 
+    order = list(subs.index)
     out = subs.copy()
-    out["status"] = [r["status"] for r in results]
-    out["orig_area_m2"] = [r["orig_area_m2"] for r in results]
-    out["refined_area_m2"] = [r["refined_area_m2"] for r in results]
-    out["geometry"] = [r["geometry"] for r in results]
+    out["status"] = [cache_records[i]["status"] for i in order]
+    out["orig_area_m2"] = [cache_records[i]["orig_area_m2"] for i in order]
+    out["refined_area_m2"] = [cache_records[i]["refined_area_m2"] for i in order]
+    out["geometry"] = [cache_records[i]["geometry"] for i in order]
     out["area_m2"] = [geodesic_area_m2(g) for g in out.geometry]
 
-    out_path = Path(labels_dir) / aoi / "substations_poly_refined.parquet"
+    out_path = aoi_dir / "substations_poly_refined.parquet"
     out.to_parquet(out_path)
     log.info("Wrote %s (%d rows); status counts:\n%s", out_path, len(out),
              out.status.value_counts().to_string())

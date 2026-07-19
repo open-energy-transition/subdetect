@@ -86,7 +86,8 @@ def composite_index(region_dir: str) -> CompositeIndex:
     return CompositeIndex(Path(region_dir))
 
 
-def load_substation_labels(labels_dir: Path, min_area_m2: float = 1000.0) -> gpd.GeoDataFrame:
+def load_substation_labels(labels_dir: Path, min_area_m2: float = 1000.0,
+                            prefer_refined: bool = True, voltage_only: bool = False) -> gpd.GeoDataFrame:
     """Combined substation label set with a `role` column driving mask semantics:
 
     - role="pos"   substation polygon >= min_area_m2  -> class 1
@@ -95,22 +96,31 @@ def load_substation_labels(labels_dir: Path, min_area_m2: float = 1000.0) -> gpd
     - role="plant" power=plant polygon                -> ignore (-1)
 
     Prefers `substations_poly_refined.parquet` (see label_refine.py) over the raw
-    `substations_poly.parquet` when present: refined geometries are tighter (S1+NDVI
-    shrunk), and polygons flagged `status=no_signal` (no S1 backscatter evidence of
-    real infrastructure anywhere inside them) are always demoted to role="small"
-    regardless of area, since the OSM way likely doesn't cover real transmission-class
-    equipment at all.
+    `substations_poly.parquet` when present (unless `prefer_refined=False`, e.g. to run a
+    clean single-variable experiment against a raw-label baseline model): refined
+    geometries are tighter (S1+NDVI shrunk), and polygons flagged `status=no_signal` or
+    `status=village` (no trustworthy S1 backscatter evidence of real transmission-class
+    infrastructure -- either no core at all, or the core is more likely village rooftops
+    than a substation) are always demoted to role="small" regardless of area.
+
+    `voltage_only=True` additionally demotes any polygon without a valid OSM `voltage`
+    tag (NaN or <=0) to role="small" regardless of area -- untagged polygons are dropped
+    from positive supervision, not taught as background, since they may still be real
+    substations that just weren't tagged.
     """
     labels_dir = Path(labels_dir)
     parts = []
 
     refined_p = labels_dir / "substations_poly_refined.parquet"
-    subs = gpd.read_parquet(refined_p if refined_p.exists() else labels_dir / "substations_poly.parquet")
+    subs = gpd.read_parquet(refined_p if prefer_refined and refined_p.exists()
+                             else labels_dir / "substations_poly.parquet")
     if "area_m2" not in subs.columns:
         subs["area_m2"] = [geodesic_area_m2(g) for g in subs.geometry]
     role = np.where(subs.area_m2 >= min_area_m2, "pos", "small")
     if "status" in subs.columns:
-        role = np.where(subs.status == "no_signal", "small", role)
+        role = np.where(subs.status.isin(["no_signal", "village"]), "small", role)
+    if voltage_only:
+        role = np.where(subs.voltage_v.notna() & (subs.voltage_v > 0), role, "small")
     subs = subs.assign(role=role)
     parts.append(subs[["geometry", "area_m2", "voltage_v", "role"]])
 

@@ -1,4 +1,4 @@
-"""Decision-level S1+S2 fusion: combine the two single-modality v4 arms' probability
+"""Decision-level S1+S2 fusion: combine the two single-modality v5 arms' probability
 maps on val chips and compare against each alone. No training required.
 
 Combos: geometric mean, arithmetic mean, max, and s1-gated (S1 prob softly modulated
@@ -24,11 +24,11 @@ from subdetect.infer import load_model
 
 logging.disable(logging.INFO)
 CKPTS = {
-    "s1only": "data/models/stageA_v4_s1only/terramind-sub-epoch=15-step=1376.ckpt",
-    "s2only": "data/models/stageA_v4_s2only/terramind-sub-epoch=23-step=2064.ckpt",
+    "s1only": "data/models/stageA_v5_s1only/terramind-sub-epoch=24-step=6975.ckpt",
+    "s2only": "data/models/stageA_v5_s2only/terramind-sub-epoch=40-step=11439.ckpt",
 }
 
-idx = pd.read_parquet("data/chips/pakistan/index.parquet")
+idx = pd.read_parquet("data/chips_v5/pakistan/index.parquet")
 val = idx[idx.split == "val"]
 labels = load_substation_labels(Path("data/labels/pakistan"), min_area_m2=20000.0)
 big = labels[labels.role == "pos"]

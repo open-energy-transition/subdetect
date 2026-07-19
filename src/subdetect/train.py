@@ -48,18 +48,18 @@ def run_training(config: Path, smoke: bool = False) -> Path:
     # Auto-resume takes priority: this environment kills long background jobs
     # unpredictably, so a same-config restart must pick up mid-training rather than
     # re-warm-start. Lightning's ckpt_path restores model+optimizer+epoch+callbacks.
+    try:
+        import segmentation_models_pytorch as smp
+
+        torch.serialization.add_safe_globals([smp.losses.TverskyLoss])
+    except Exception:  # noqa: BLE001
+        pass
     resume_ckpt = ckpt_dir / "last.ckpt"
     if resume_ckpt.exists():
         log.info("Resuming interrupted run from %s", resume_ckpt)
     elif cfg.get("init_weights_from"):
         # Warm-start from a previously fine-tuned checkpoint's weights only (fresh
         # optimizer/epoch count) -- e.g. continuing training with newly added data.
-        try:
-            import segmentation_models_pytorch as smp
-
-            torch.serialization.add_safe_globals([smp.losses.TverskyLoss])
-        except Exception:  # noqa: BLE001
-            pass
         state = torch.load(cfg["init_weights_from"], map_location="cpu")["state_dict"]
         task.load_state_dict(state)
         log.info("Initialized weights from %s", cfg["init_weights_from"])

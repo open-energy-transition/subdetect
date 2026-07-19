@@ -1,0 +1,51 @@
+# v6b: ablation, isolating the label-refinement effect from v6's Yunnan hard-negative
+# addition. Identical chip recipe to v5 (india_pilot + pakistan:2 + pakistan_hardneg,
+# no yunnan_hardneg) but on the refined-label chips_v6 directories instead of chips_v5.
+# v6 (refined labels + yunnan_hardneg) regressed vs v5 on both the held-out Pakistan
+# chips and the independent sindh_test region (AUC 0.772->0.671, P@20 0.35->0.10,
+# +67% candidate count for fewer true hits -- see conversation). This run tests
+# whether the refined labels alone reproduce that regression, or whether v6's drop
+# was driven by the added hard negatives instead.
+data:
+  index_path: data/chips_v6b/combined/index.parquet
+  batch_size: 8
+  num_workers: 4
+  modalities: [S1RTC]
+
+task:
+  model_factory: EncoderDecoderFactory
+  model_args:
+    backbone: terramind_v1_tiny
+    backbone_pretrained: true
+    backbone_modalities: [S1RTC]
+    backbone_bands:
+      S1RTC: [VV, VH]
+    necks:
+      - name: SelectIndices
+        indices: [2, 5, 8, 11]
+      - name: ReshapeTokensToImage
+        remove_cls_token: false
+      - name: LearnedInterpolateToPyramidal
+    decoder: UNetDecoder
+    decoder_channels: [256, 128, 64, 32]
+    num_classes: 2
+    rescale: true
+  loss: tversky
+  tversky_args: {alpha: 0.35, beta: 0.65, gamma: 1.33}
+  class_weights: [0.25, 0.75]
+  ignore_index: -1
+  lr: 1.0e-4
+  optimizer: AdamW
+  optimizer_hparams:
+    weight_decay: 0.05
+  freeze_backbone: false
+  plot_on_val: false
+
+trainer:
+  max_epochs: 60
+  accumulate_grad_batches: 2
+
+checkpoint_dir: data/models/stageA_v6b_s1only
+patience: 15
+monitor: val/mIoU
+monitor_mode: max

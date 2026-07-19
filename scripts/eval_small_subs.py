@@ -1,4 +1,4 @@
-"""Do the v4 arms detect substations BELOW the 20k m2 training floor?
+"""Do the v5 arms detect substations BELOW the 20k m2 training floor?
 
 Small subs are ignore(-1) in training masks and absent from the standard eval.
 Here: load all substation polygons (min_area=0), keep those < 20k m2 that
@@ -25,13 +25,13 @@ from subdetect.infer import load_model
 logging.disable(logging.INFO)
 THRESHOLD = 0.3
 ARMS = {
-    "s1only": "data/models/stageA_v4_s1only/terramind-sub-epoch=15-step=1376.ckpt",
-    "fusion": "data/models/stageA_v4_s1fusion/terramind-sub-epoch=26-step=2322.ckpt",
-    "s2only": "data/models/stageA_v4_s2only/terramind-sub-epoch=23-step=2064.ckpt",
+    "s1only": "data/models/stageA_v5_s1only/terramind-sub-epoch=24-step=6975.ckpt",
+    "fusion": "data/models/stageA_v5_s1fusion/terramind-sub-epoch=45-step=12834.ckpt",
+    "s2only": "data/models/stageA_v5_s2only/terramind-sub-epoch=40-step=11439.ckpt",
 }
 BUCKETS = [(1000, 2000), (2000, 5000), (5000, 10000), (10000, 20000)]
 
-idx = pd.read_parquet("data/chips/pakistan/index.parquet")
+idx = pd.read_parquet("data/chips_v5/pakistan/index.parquet")
 val = idx[idx.split == "val"]
 labels = load_substation_labels(Path("data/labels/pakistan"), min_area_m2=0.0)
 poly = labels[labels.role.isin(["pos", "small"])].copy()

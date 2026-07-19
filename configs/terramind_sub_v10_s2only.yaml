@@ -1,0 +1,56 @@
+# v10 s2only: v9's exact recipe/arch/loss, plus 299 global hard-negative chips
+# (scripts/build_global_hardneg_chips.py + scripts/merge_chip_index_v10_s2only.py) mined
+# from well-mapped cities/water bodies, Overpass-verified clean of any real substation.
+# v9 alone is 94.5% positive chips (every TorchGeo location was curated around a real
+# substation with zero accompanying negatives); this index is 93.8% positive -- a small
+# nudge, not a fix, since 299 negatives is tiny next to 29,582 positives. Extending
+# CITIES/WATER in build_global_hardneg_chips.py and re-running would add more.
+# NOTE val/mIoU is NOT comparable to v9_s2only -- the val split changed again (adds the
+# hard-negative chips' own held-out val rows). Compare via field_eval.py on sindh_test.
+# v10 also upgrades the backbone terramind_v1_tiny -> terramind_v1_base (first backbone
+# change since v1; two variables vs v9: +hardnegs, +base). batch_size 8->4 with
+# accumulate 2->4 keeps the effective batch at 16 within the GTX 1060's 6 GB.
+data:
+  index_path: data/chips_v10/combined/index.parquet
+  batch_size: 4
+  num_workers: 4
+  modalities: [S2L2A]
+
+task:
+  model_factory: EncoderDecoderFactory
+  model_args:
+    backbone: terramind_v1_base
+    backbone_pretrained: true
+    backbone_modalities: [S2L2A]
+    backbone_bands:
+      S2L2A: [BLUE, GREEN, RED, RED_EDGE_1, RED_EDGE_2, RED_EDGE_3,
+              NIR_BROAD, NIR_NARROW, SWIR_1, SWIR_2]
+    necks:
+      - name: SelectIndices
+        indices: [2, 5, 8, 11]
+      - name: ReshapeTokensToImage
+        remove_cls_token: false
+      - name: LearnedInterpolateToPyramidal
+    decoder: UNetDecoder
+    decoder_channels: [256, 128, 64, 32]
+    num_classes: 2
+    rescale: true
+  loss: tversky
+  tversky_args: {alpha: 0.35, beta: 0.65, gamma: 1.33}
+  class_weights: [0.25, 0.75]
+  ignore_index: -1
+  lr: 1.0e-4
+  optimizer: AdamW
+  optimizer_hparams:
+    weight_decay: 0.05
+  freeze_backbone: false
+  plot_on_val: false
+
+trainer:
+  max_epochs: 60
+  accumulate_grad_batches: 4
+
+checkpoint_dir: data/models/stageA_v10_s2only
+patience: 15
+monitor: val/mIoU
+monitor_mode: max

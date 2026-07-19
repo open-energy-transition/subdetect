@@ -123,7 +123,8 @@ column reference, and results: [docs/osmose-detect.md](docs/osmose-detect.md).
 - [docs/architecture.md](docs/architecture.md) — full pipeline stage-by-stage, the earthpv relationship, and the `scripts/` catalogue
 - [docs/worked-example.md](docs/worked-example.md) — pixel-level walkthrough of one real detection
 - [docs/osmose-detect.md](docs/osmose-detect.md) — the Osmose regional workflow, output columns, real results
-- [docs/model-lineage.md](docs/model-lineage.md) — the full v1→v5 debugging story, with charts
+- [docs/model-lineage.md](docs/model-lineage.md) — the full v1→v9 debugging story, with charts
+- [docs/expanding-training-data.md](docs/expanding-training-data.md) — merging in the TorchGeo `Substation` dataset and mining global hard negatives, as runnable walkthroughs
 - [docs/glossary.md](docs/glossary.md) — every domain term used across this documentation
 
 ## Hardware note

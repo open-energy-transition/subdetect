@@ -1,0 +1,54 @@
+# v9 s2only: v5_s2only's exact recipe/arch/loss, but the chip index adds the
+# TransitionZero/TorchGeo global Substation dataset (26k+ locations, S2-only, no local
+# region bias -- see scripts/build_chips_from_substation_ds.py +
+# scripts/merge_chip_index_v9_s2only.py) on top of v5's india_pilot+pakistan+hardneg mix.
+# Targets the S2-only arm specifically: it was the weakest and most data-starved arm at
+# v5 (val IoU_1 0.111 vs 0.212 for s1only) and, unlike the S1 arm's v6-v8 label/sampling
+# ablations, had never had more data thrown at it.
+# NOTE val/mIoU is NOT comparable to v5_s2only -- the val split changed (new global
+# torchgeo chips + their own held-out 10%). Compare via evaluate.py size buckets +
+# scripts/eval_polygonize_v2.py / scripts/field_eval.py on sindh_test, same as v6-v8.
+data:
+  index_path: data/chips_v9/combined/index.parquet
+  batch_size: 8
+  num_workers: 4
+  modalities: [S2L2A]
+
+task:
+  model_factory: EncoderDecoderFactory
+  model_args:
+    backbone: terramind_v1_tiny
+    backbone_pretrained: true
+    backbone_modalities: [S2L2A]
+    backbone_bands:
+      S2L2A: [BLUE, GREEN, RED, RED_EDGE_1, RED_EDGE_2, RED_EDGE_3,
+              NIR_BROAD, NIR_NARROW, SWIR_1, SWIR_2]
+    necks:
+      - name: SelectIndices
+        indices: [2, 5, 8, 11]
+      - name: ReshapeTokensToImage
+        remove_cls_token: false
+      - name: LearnedInterpolateToPyramidal
+    decoder: UNetDecoder
+    decoder_channels: [256, 128, 64, 32]
+    num_classes: 2
+    rescale: true
+  loss: tversky
+  tversky_args: {alpha: 0.35, beta: 0.65, gamma: 1.33}
+  class_weights: [0.25, 0.75]
+  ignore_index: -1
+  lr: 1.0e-4
+  optimizer: AdamW
+  optimizer_hparams:
+    weight_decay: 0.05
+  freeze_backbone: false
+  plot_on_val: false
+
+trainer:
+  max_epochs: 60
+  accumulate_grad_batches: 2
+
+checkpoint_dir: data/models/stageA_v9_s2only
+patience: 15
+monitor: val/mIoU
+monitor_mode: max

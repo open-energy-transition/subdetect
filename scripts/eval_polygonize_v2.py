@@ -31,29 +31,13 @@ sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from subdetect.config import Settings, geodesic_area_m2  # noqa: E402
+from subdetect.evaluate import auc, precision_at  # noqa: E402
 from subdetect.postprocess import polygonize_chips, polygonize_chips_v2  # noqa: E402
 from osmose_detect import fetch_substations  # noqa: E402
 
 EQ = "EPSG:6933"
 NODE_DISC_M = 100.0  # Overpass returns centers; a disc gives polygons a chance to hit
 PLATEAU = (0.49, 0.51)
-
-
-def auc(scores: np.ndarray, y: np.ndarray) -> float:
-    """Mann-Whitney AUC: P(score of random positive > score of random negative)."""
-    from scipy.stats import rankdata
-
-    n_pos, n_neg = int(y.sum()), int((~y).sum())
-    if n_pos == 0 or n_neg == 0:
-        return float("nan")
-    r = rankdata(scores)
-    return float((r[y].sum() - n_pos * (n_pos + 1) / 2) / (n_pos * n_neg))
-
-
-def precision_at(scores: np.ndarray, y: np.ndarray, k: int) -> float:
-    order = np.argsort(-scores, kind="stable")
-    top = order[: min(k, len(order))]
-    return float(y[top].mean()) if len(top) else float("nan")
 
 
 def _ground_truth(labels_aoi: str | None, bounds) -> tuple[object, str]:

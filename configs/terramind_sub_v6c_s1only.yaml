@@ -1,0 +1,53 @@
+# v6c: same recipe as v6b (india_pilot + pakistan:2 + pakistan_hardneg, no yunnan_hardneg)
+# but on chips_v6c, built after adding the building-density guard to label_refine.py.
+# v6b (refined labels, no yunnan) showed a mild-but-real regression vs v5: more false
+# positives (+27%), worse >=20k recall (83.3%->72.2%), more fragmented candidates on
+# sindh_test -- but nearly matched v5 on sindh_test AUC/hit-count. The guard fix caught
+# 5 Pakistan + 1 India village/building-clutter mislabels that v6b's refinement missed
+# (rooftops backscatter like switchyard equipment and were being incorrectly kept as
+# "tight"/"refined" positives). This run tests whether that fix closes v6b's remaining
+# gap to v5. Compare against v5 AND v6b via evaluate.py + eval_polygonize_v2.py on
+# sindh_test (see conversation for the exact methodology).
+data:
+  index_path: data/chips_v6c/combined/index.parquet
+  batch_size: 8
+  num_workers: 4
+  modalities: [S1RTC]
+
+task:
+  model_factory: EncoderDecoderFactory
+  model_args:
+    backbone: terramind_v1_tiny
+    backbone_pretrained: true
+    backbone_modalities: [S1RTC]
+    backbone_bands:
+      S1RTC: [VV, VH]
+    necks:
+      - name: SelectIndices
+        indices: [2, 5, 8, 11]
+      - name: ReshapeTokensToImage
+        remove_cls_token: false
+      - name: LearnedInterpolateToPyramidal
+    decoder: UNetDecoder
+    decoder_channels: [256, 128, 64, 32]
+    num_classes: 2
+    rescale: true
+  loss: tversky
+  tversky_args: {alpha: 0.35, beta: 0.65, gamma: 1.33}
+  class_weights: [0.25, 0.75]
+  ignore_index: -1
+  lr: 1.0e-4
+  optimizer: AdamW
+  optimizer_hparams:
+    weight_decay: 0.05
+  freeze_backbone: false
+  plot_on_val: false
+
+trainer:
+  max_epochs: 60
+  accumulate_grad_batches: 2
+
+checkpoint_dir: data/models/stageA_v6c_s1only
+patience: 15
+monitor: val/mIoU
+monitor_mode: max

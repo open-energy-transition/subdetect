@@ -1,0 +1,53 @@
+# v8 run 2: identical to configs/terramind_sub_v8_s1only.yaml (same data index, same
+# architecture/hyperparameters) -- only the checkpoint_dir differs, so this gets a fresh
+# random weight-init/batch-shuffle seed instead of resuming the finished v8 run (train.py
+# auto-resumes from checkpoint_dir/last.ckpt when present). No seed is fixed anywhere in
+# this pipeline (chip sampling is deterministic, but training itself isn't seeded), so a
+# plain rerun into a clean directory already gives a genuine independent stochastic
+# replicate. Purpose: check whether v8's mixed result (best-ever P@20/hits on sindh_test,
+# worst-ever >=20k recall on the Pakistan chip eval) is a real, reproducible effect of the
+# voltage-weighting or just noise from a single training run -- see conversation/memory
+# ([[subdetect-v8-voltage-weight]]).
+data:
+  index_path: data/chips_v8/combined/index.parquet
+  batch_size: 8
+  num_workers: 4
+  modalities: [S1RTC]
+
+task:
+  model_factory: EncoderDecoderFactory
+  model_args:
+    backbone: terramind_v1_tiny
+    backbone_pretrained: true
+    backbone_modalities: [S1RTC]
+    backbone_bands:
+      S1RTC: [VV, VH]
+    necks:
+      - name: SelectIndices
+        indices: [2, 5, 8, 11]
+      - name: ReshapeTokensToImage
+        remove_cls_token: false
+      - name: LearnedInterpolateToPyramidal
+    decoder: UNetDecoder
+    decoder_channels: [256, 128, 64, 32]
+    num_classes: 2
+    rescale: true
+  loss: tversky
+  tversky_args: {alpha: 0.35, beta: 0.65, gamma: 1.33}
+  class_weights: [0.25, 0.75]
+  ignore_index: -1
+  lr: 1.0e-4
+  optimizer: AdamW
+  optimizer_hparams:
+    weight_decay: 0.05
+  freeze_backbone: false
+  plot_on_val: false
+
+trainer:
+  max_epochs: 60
+  accumulate_grad_batches: 2
+
+checkpoint_dir: data/models/stageA_v8_run2_s1only
+patience: 15
+monitor: val/mIoU
+monitor_mode: max
