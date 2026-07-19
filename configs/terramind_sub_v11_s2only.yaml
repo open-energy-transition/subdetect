@@ -1,0 +1,55 @@
+# v11 s2only: v9's exact recipe/arch/loss (tiny backbone -- deliberately NOT taking
+# v10's backbone change, one variable at a time), with the chip index rebalanced by
+# two hard-negative sets: the 299 global city/water chips (v10's never-trained
+# addition) and 5,533 settlement/construction chips mined from Pakistan+India OSM
+# (scripts/build_settlement_hardneg_chips.py + merge_chip_index_v11_s2only.py).
+# Positive share drops 94.5% -> 79.8%.
+# Motivation: 2026-07-19 field validation of v9 leads found the dominant FP classes
+# are villages, construction sites and bare land -- classes the v9 index never
+# showed as labeled background.
+# NOTE val/mIoU NOT comparable to v9 (val split gains the hard-negative rows).
+# Compare via scripts/field_eval.py on sindh_test (arm alone + mean fusion).
+data:
+  index_path: data/chips_v11/combined/index.parquet
+  batch_size: 8
+  num_workers: 4
+  modalities: [S2L2A]
+
+task:
+  model_factory: EncoderDecoderFactory
+  model_args:
+    backbone: terramind_v1_tiny
+    backbone_pretrained: true
+    backbone_modalities: [S2L2A]
+    backbone_bands:
+      S2L2A: [BLUE, GREEN, RED, RED_EDGE_1, RED_EDGE_2, RED_EDGE_3,
+              NIR_BROAD, NIR_NARROW, SWIR_1, SWIR_2]
+    necks:
+      - name: SelectIndices
+        indices: [2, 5, 8, 11]
+      - name: ReshapeTokensToImage
+        remove_cls_token: false
+      - name: LearnedInterpolateToPyramidal
+    decoder: UNetDecoder
+    decoder_channels: [256, 128, 64, 32]
+    num_classes: 2
+    rescale: true
+  loss: tversky
+  tversky_args: {alpha: 0.35, beta: 0.65, gamma: 1.33}
+  class_weights: [0.25, 0.75]
+  ignore_index: -1
+  lr: 1.0e-4
+  optimizer: AdamW
+  optimizer_hparams:
+    weight_decay: 0.05
+  freeze_backbone: false
+  plot_on_val: false
+
+trainer:
+  max_epochs: 60
+  accumulate_grad_batches: 2
+
+checkpoint_dir: data/models/stageA_v11_s2only
+patience: 15
+monitor: val/mIoU
+monitor_mode: max
