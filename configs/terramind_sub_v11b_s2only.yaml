@@ -1,0 +1,55 @@
+# v11b s2only: fixes the v11 regression (field_eval 2026-07-20: sindh_test candidates
+# 201->48, hits 22->4, mean per-cell max prob 0.772->0.435 -- confirmed a real global
+# suppression, not an inference bug). Root cause: v11 jumped negative-only chips
+# 1,670->7,502 (4.5x) while class_weights/tversky alpha-beta stayed tuned for v9's
+# ~95%-positive balance -- see scripts/rebalance_chip_index_v11b.py for the full
+# diagnosis. This config is v9/v11's exact recipe with ONLY the index swapped to
+# data/chips_v11b (negatives capped at ~2x v9's original count, proportionally
+# sampled across all four negative sources so none vanishes): 32,921 chips, 89.9%
+# positive.
+# NOTE val/mIoU NOT comparable to v9 or v11 (val split differs again). Compare via
+# scripts/field_eval.py on sindh_test (arm + mean fusion) against both.
+data:
+  index_path: data/chips_v11b/combined/index.parquet
+  batch_size: 8
+  num_workers: 4
+  modalities: [S2L2A]
+
+task:
+  model_factory: EncoderDecoderFactory
+  model_args:
+    backbone: terramind_v1_tiny
+    backbone_pretrained: true
+    backbone_modalities: [S2L2A]
+    backbone_bands:
+      S2L2A: [BLUE, GREEN, RED, RED_EDGE_1, RED_EDGE_2, RED_EDGE_3,
+              NIR_BROAD, NIR_NARROW, SWIR_1, SWIR_2]
+    necks:
+      - name: SelectIndices
+        indices: [2, 5, 8, 11]
+      - name: ReshapeTokensToImage
+        remove_cls_token: false
+      - name: LearnedInterpolateToPyramidal
+    decoder: UNetDecoder
+    decoder_channels: [256, 128, 64, 32]
+    num_classes: 2
+    rescale: true
+  loss: tversky
+  tversky_args: {alpha: 0.35, beta: 0.65, gamma: 1.33}
+  class_weights: [0.25, 0.75]
+  ignore_index: -1
+  lr: 1.0e-4
+  optimizer: AdamW
+  optimizer_hparams:
+    weight_decay: 0.05
+  freeze_backbone: false
+  plot_on_val: false
+
+trainer:
+  max_epochs: 60
+  accumulate_grad_batches: 2
+
+checkpoint_dir: data/models/stageA_v11b_s2only
+patience: 15
+monitor: val/mIoU
+monitor_mode: max
