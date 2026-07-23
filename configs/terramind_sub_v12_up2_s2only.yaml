@@ -1,19 +1,26 @@
-# v12 up2: v11's exact index/recipe with 2x bicubic input upsampling (on-the-fly in
-# SubChipDataset, data.upsample: 2 -- masks nearest-upsampled). ONE variable vs v11.
+# v12 up2: v11b's index/recipe with 2x bicubic input upsampling (on-the-fly in
+# SubChipDataset, data.upsample: 2 -- masks nearest-upsampled). ONE variable vs v11b,
+# NOT v11 -- v11's raw index has the 4.5x negative-chip jump that caused the v11
+# regression (see MEMORY subdetect-v11-regression); v11b's rebalance-capped index
+# (89.8% positive) matches the class_weights/Tversky alpha-beta below, which were
+# tuned for that ratio. Switched 2026-07-23 before the full run (was still pointing
+# at chips_v11 from initial ablation prep, before the v11 regression was diagnosed).
 #
 # Hypothesis (see the 2026-07-19 super-resolution discussion + the small-sub audit):
-# the <2,000 m2 recall floor (0/15 in eval_small_subs.py) is a TOKEN-GRANULARITY
-# limit, not an optics limit -- a 45x45 m yard is sub-token for a 16 px ViT patch at
-# 10 m (one token = 160 m). Upsampling adds no information but quadruples tokens on
-# the object. Judge on eval_small_subs.py size buckets + field_eval.py (sindh_test),
-# NOT val/mIoU (split unchanged vs v11 but pixel counts scale with upsampling).
+# the <2,000 m2 recall floor (0/15 in eval_small_subs.py, and 0.0 in every field_eval.py
+# run to date across every model version) is a TOKEN-GRANULARITY limit, not an optics
+# limit -- a 45x45 m yard is sub-token for a 16 px ViT patch at 10 m (one token =
+# 160 m). Upsampling adds no information but quadruples tokens on the object. Judge on
+# eval_small_subs.py size buckets + field_eval.py (sindh_test), NOT val/mIoU (split
+# unchanged vs v11b but pixel counts scale with upsampling).
 #
 # Memory: 448 px inputs on the GTX 1060 (6 GB) -> batch 2 + accumulate 8 keeps the
-# effective batch at 16. Expect ~4x slower epochs than v11.
+# effective batch at 16. Expect ~4x slower epochs than v11b.
 # NOTE inference must mirror the upsampling: predict on 2x-upsampled windows and
-# downsample the prob map (not yet wired into infer.py / infer_fused_aoi.py).
+# downsample the prob map -- wired via subdetect.infer.predict_window (see
+# scripts/infer_sindh_test_v12.py).
 data:
-  index_path: data/chips_v11/combined/index.parquet
+  index_path: data/chips_v11b/combined/index.parquet
   batch_size: 2
   num_workers: 4
   modalities: [S2L2A]
