@@ -50,5 +50,5 @@ trainer:
 
 checkpoint_dir: data/models/stageA_v9_s2only
 patience: 15
-monitor: val/mIoU
+monitor: val/IoU_1
 monitor_mode: max

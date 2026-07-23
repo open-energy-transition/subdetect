@@ -1,16 +1,10 @@
-# v11b s2only: fixes the v11 regression (field_eval 2026-07-20: sindh_test candidates
-# 201->48, hits 22->4, mean per-cell max prob 0.772->0.435 -- confirmed a real global
-# suppression, not an inference bug). Root cause: v11 jumped negative-only chips
-# 1,670->7,502 (4.5x) while class_weights/tversky alpha-beta stayed tuned for v9's
-# ~95%-positive balance -- see scripts/rebalance_chip_index_v11b.py for the full
-# diagnosis. This config is v9/v11's exact recipe with ONLY the index swapped to
-# data/chips_v11b (negatives capped at ~2x v9's original count, proportionally
-# sampled across all four negative sources so none vanishes): 32,921 chips, 89.9%
-# positive.
-# NOTE val/mIoU NOT comparable to v9 or v11 (val split differs again). Compare via
-# scripts/field_eval.py on sindh_test (arm + mean fusion) against both.
+# Throwaway smoke-test baseline (upsample=1) for comparing against
+# terramind_sub_v12_up2_smoke.yaml -- identical recipe/index to terramind_sub_v11_s2only.yaml,
+# separate checkpoint_dir so this doesn't touch the real stageA_v11_s2only checkpoint
+# (which already has a completed run) or its last.ckpt auto-resume. Delete
+# data/models/_smoke_v11_baseline once done comparing.
 data:
-  index_path: data/chips_v11b/combined/index.parquet
+  index_path: data/chips_v11/combined/index.parquet
   batch_size: 8
   num_workers: 4
   modalities: [S2L2A]
@@ -49,7 +43,7 @@ trainer:
   max_epochs: 60
   accumulate_grad_batches: 2
 
-checkpoint_dir: data/models/stageA_v11b_s2only
+checkpoint_dir: data/models/_smoke_v11_baseline
 patience: 15
 monitor: val/IoU_1
 monitor_mode: max

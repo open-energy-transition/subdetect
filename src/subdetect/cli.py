@@ -118,11 +118,13 @@ def infer(
     checkpoint: Path = typer.Option(..., help="Trained model checkpoint"),
     out_dir: Path = typer.Option(Path("data/predictions")),
     limit: int = typer.Option(0, help="Cap number of cells (0 = all)"),
+    upsample: int = typer.Option(
+        1, help="Must match the checkpoint's training-time data.upsample (e.g. 2 for v12_up2)"),
 ) -> None:
     """Tiled inference over an AOI, writing probability GeoTIFFs per cell."""
     from subdetect.infer import run_inference
 
-    run_inference(aoi=aoi, checkpoint=checkpoint, out_dir=out_dir, limit=limit)
+    run_inference(aoi=aoi, checkpoint=checkpoint, out_dir=out_dir, limit=limit, upsample=upsample)
 
 
 @app.command()

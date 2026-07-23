@@ -39,8 +39,8 @@ from shapely.strtree import STRtree
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
-from subdetect.chips import _chip_id  # noqa: E402
-from subdetect.config import CHIP_SIZE  # noqa: E402
+from subdetect.chips import _chip_id, _split_of  # noqa: E402
+from subdetect.config import CHIP_SIZE, Settings  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("settlement_hardneg")
@@ -49,7 +49,6 @@ EQ = "EPSG:6933"
 SUB_CLEARANCE_M = 1600.0   # > chip half-diagonal (224 px * 10 m -> 1583 m)
 LINE_CLEARANCE_M = 500.0   # unmapped substations sit on mapped lines
 DEDUP_GRID_M = 1500.0
-VAL_FRAC = 0.1
 
 AOIS = {
     "pakistan": ROOT / "data/osm/pakistan-latest.osm.pbf",
@@ -158,7 +157,7 @@ def dedup_and_cap(pts: gpd.GeoDataFrame, caps: dict, rng: np.random.Generator) -
 
 
 def cut_chips(aoi: str, pts: gpd.GeoDataFrame, cells: gpd.GeoDataFrame,
-              out_dir: Path, rng: np.random.Generator) -> list[dict]:
+              out_dir: Path, rng: np.random.Generator, aoi_cfg: dict) -> list[dict]:
     (out_dir / "images").mkdir(parents=True, exist_ok=True)
     (out_dir / "masks").mkdir(parents=True, exist_ok=True)
     joined = gpd.sjoin(pts, cells, how="inner", predicate="within")
@@ -197,7 +196,11 @@ def cut_chips(aoi: str, pts: gpd.GeoDataFrame, cells: gpd.GeoDataFrame,
                 records.append({
                     "chip_id": cid, "lon": row.geometry.x, "lat": row.geometry.y,
                     "kind": "hard_negative", "tile": f"{aoi}_{row.cls}",
-                    "split": "val" if rng.random() < VAL_FRAC else "train",
+                    # Geographic split (same val_bbox as the primary chip builder), not a
+                    # random fraction: keeps val strictly to the Pakistan/Sindh deployment
+                    # holdout instead of diluting it with chips from anywhere the mined
+                    # settlements happen to fall.
+                    "split": _split_of(row.geometry.x, row.geometry.y, aoi_cfg),
                     "sub_pixels": 0, "image": str(img_p.relative_to(ROOT)), "s1": None,
                     "mask": str(mask_p.relative_to(ROOT)), "aoi": "settlement_hardneg",
                 })
@@ -212,6 +215,7 @@ def main() -> None:
     caps = {k: int(v) for k, v in (kv.split("=") for kv in a.per_class_cap.split(","))}
     out_dir = ROOT / a.out
     rng = np.random.default_rng(42)
+    settings = Settings.load()
 
     all_records = []
     for aoi, pbf in AOIS.items():
@@ -222,7 +226,9 @@ def main() -> None:
         pts = clearance_filter(aoi, pts)
         pts = dedup_and_cap(pts, caps, rng)
         log.info("%s: %d after dedup+cap", aoi, len(pts))
-        all_records += cut_chips(aoi, gpd.GeoDataFrame(pts, crs="EPSG:4326"), cells, out_dir, rng)
+        aoi_cfg = settings.aois.get(aoi, {})
+        all_records += cut_chips(aoi, gpd.GeoDataFrame(pts, crs="EPSG:4326"), cells, out_dir, rng,
+                                 aoi_cfg)
 
     idx = pd.DataFrame(all_records)
     idx.to_parquet(out_dir / "index.parquet")

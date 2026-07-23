@@ -193,7 +193,10 @@ def _process_location(name: str, lat: float, lon: float, out_dir: Path,
             _write_tif(img_path, chip.astype("uint16"), chip_transform, crs, "uint16")
             mask = np.zeros((CHIP_SIZE, CHIP_SIZE), dtype="int16")
             _write_tif(mask_path, mask, chip_transform, crs, "int16")
-        split = "val" if int(cid[-2:], 16) < 26 else "train"
+        # Train-only: global cities/water have no relation to the Pakistan/Sindh
+        # deployment domain -- val should come only from the geographic holdout
+        # (val_bbox in configs/aoi.yaml), not a hash split of unrelated locations.
+        split = "train"
         records.append(dict(chip_id=cid, lon=lonlat[0], lat=lonlat[1], kind="hard_negative",
                             tile=name, split=split, sub_pixels=0,
                             image=str(img_path), s1=None, mask=str(mask_path)))

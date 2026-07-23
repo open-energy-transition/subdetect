@@ -42,14 +42,16 @@ WIN, STRIDE = 224, 104
 
 
 def main() -> None:
-    import torch
-    from subdetect.infer import _standardize_s1, load_model
+    from subdetect.infer import load_model, predict_window
 
     ap = argparse.ArgumentParser()
     ap.add_argument("--aoi", required=True)
     ap.add_argument("--out-dir", default="data/predictions_v9_fused")
     ap.add_argument("--s1-ckpt", default=str(S1_CKPT))
     ap.add_argument("--s2-ckpt", default=str(S2_CKPT))
+    ap.add_argument("--s2-upsample", type=int, default=1,
+                    help="Must match the S2 checkpoint's training-time data.upsample "
+                         "(e.g. 2 for v12_up2)")
     a = ap.parse_args()
 
     comp_dir = ROOT / "data/composites" / a.aoi / "composites"
@@ -64,15 +66,10 @@ def main() -> None:
         mods = task.hparams.get("model_args", {}).get("backbone_modalities", ["S2L2A"])
         tasks[name] = (task, mods)
     hann = np.outer(np.hanning(WIN), np.hanning(WIN)).astype("float32") + 1e-3
+    upsamples = {"s1": 1, "s2": a.s2_upsample}
 
-    def predict(task, mods, s2_np, s1_np):
-        s2_t = torch.from_numpy(s2_np / 10000.0)[None].to(device)
-        x = ({m: (s2_t if m == "S2L2A" else torch.from_numpy(_standardize_s1(s1_np))[None].to(device))
-              for m in mods} if "S1RTC" in mods else s2_t)
-        with torch.no_grad(), torch.autocast(device_type=device, enabled=device == "cuda"):
-            out = task(x)
-            logits = out.output if hasattr(out, "output") else out
-            return torch.softmax(logits, 1)[0, 1].float().cpu().numpy()
+    def predict(name, task, mods, s2_np, s1_np):
+        return predict_window(task, mods, device, s2_np, s1_np, upsample=upsamples[name])
 
     cells = sorted(p.name for p in comp_dir.iterdir() if p.is_dir())
     log.info("%s: %d cells -> %s", a.aoi, len(cells), out_dirs["gated"].parent)
@@ -102,10 +99,10 @@ def main() -> None:
                     h, w = min(WIN, H - r), min(WIN, W - c)
                     if (s2_np[:, :h, :w] > 0).mean() < 0.2:
                         continue
-                    p2 = predict(*tasks["s2"], s2_np, None)
+                    p2 = predict("s2", *tasks["s2"], s2_np, None)
                     if has_s1:
                         s1_np = src1.read(window=win, boundless=True, fill_value=0).astype("float32")[:2]
-                        p1 = predict(*tasks["s1"], s2_np, s1_np)
+                        p1 = predict("s1", *tasks["s1"], s2_np, s1_np)
                         variants = {"s1": p1, "s2": p2,
                                     "gated": p1 * (0.5 + 0.5 * p2), "mean": (p1 + p2) / 2}
                     else:

@@ -1,17 +1,7 @@
-# v12 up2: v11's exact index/recipe with 2x bicubic input upsampling (on-the-fly in
-# SubChipDataset, data.upsample: 2 -- masks nearest-upsampled). ONE variable vs v11.
-#
-# Hypothesis (see the 2026-07-19 super-resolution discussion + the small-sub audit):
-# the <2,000 m2 recall floor (0/15 in eval_small_subs.py) is a TOKEN-GRANULARITY
-# limit, not an optics limit -- a 45x45 m yard is sub-token for a 16 px ViT patch at
-# 10 m (one token = 160 m). Upsampling adds no information but quadruples tokens on
-# the object. Judge on eval_small_subs.py size buckets + field_eval.py (sindh_test),
-# NOT val/mIoU (split unchanged vs v11 but pixel counts scale with upsampling).
-#
-# Memory: 448 px inputs on the GTX 1060 (6 GB) -> batch 2 + accumulate 8 keeps the
-# effective batch at 16. Expect ~4x slower epochs than v11.
-# NOTE inference must mirror the upsampling: predict on 2x-upsampled windows and
-# downsample the prob map (not yet wired into infer.py / infer_fused_aoi.py).
+# Throwaway smoke-test copy of terramind_sub_v12_up2_s2only.yaml -- separate
+# checkpoint_dir so a 50-step --smoke run doesn't write a last.ckpt into the real
+# stageA_v12_up2_s2only dir (train.py auto-resumes from last.ckpt, which would corrupt
+# the real multi-hour run). Delete data/models/_smoke_v12_up2 once done comparing.
 data:
   index_path: data/chips_v11/combined/index.parquet
   batch_size: 2
@@ -53,7 +43,7 @@ trainer:
   max_epochs: 60
   accumulate_grad_batches: 8
 
-checkpoint_dir: data/models/stageA_v12_up2_s2only
+checkpoint_dir: data/models/_smoke_v12_up2
 patience: 15
 monitor: val/IoU_1
 monitor_mode: max

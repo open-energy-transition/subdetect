@@ -123,7 +123,13 @@ def _convert_one(args: tuple) -> dict | None:
         return None
 
     sub_pixels = int((mask == 1).sum())
-    split = "val" if int(cid[-2:], 16) < 26 else "train"  # deterministic ~10% val
+    # Train-only: these locations are scattered globally with no relation to the
+    # Pakistan/Sindh deployment domain, so a random per-chip val carve-out here just
+    # dilutes val/mIoU with easy, curated-positive, out-of-domain chips (91% of v9's
+    # val set) instead of measuring generalization to the actual target region. The
+    # only val chips should come from the Pakistan geographic holdout (val_bbox in
+    # configs/aoi.yaml, applied via subdetect.chips._split_of).
+    split = "train"
     return dict(chip_id=cid, lon=lon, lat=lat, kind="positive" if sub_pixels else "background",
                 tile="torchgeo_substation", split=split, sub_pixels=sub_pixels,
                 image=str(out_img), s1=None, mask=str(out_mask))

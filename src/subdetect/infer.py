@@ -68,11 +68,46 @@ def _standardize_s1(arr: np.ndarray) -> np.ndarray:
     return x
 
 
-def run_inference(
-    aoi: str, checkpoint: Path, out_dir: Path, only_built: bool = True, limit: int = 0
-) -> Path:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+def predict_window(task, mods: list[str], device: str, s2_np: np.ndarray,
+                    s1_np: np.ndarray | None = None, upsample: int = 1) -> np.ndarray:
+    """Run one window through `task`, mirroring SubChipDataset's on-the-fly upsampling
+    (see datamodule.py, configs/terramind_sub_v12_up2_s2only.yaml): bicubic-upsample the
+    input by `upsample`x before the forward pass (a checkpoint trained with
+    `data.upsample: N` expects N x CHIP_SIZE input, not raw CHIP_SIZE), then bilinear-
+    downsample the resulting probability map back to the window's native size (`rescale`
+    in model_args makes output spatial size == input spatial size) so callers can
+    Hann-blend it into a native-resolution mosaic exactly as with upsample=1.
+    """
     import torch
+
+    s2_t = torch.from_numpy(s2_np / 10000.0)[None].to(device)
+    s1_t = torch.from_numpy(_standardize_s1(s1_np))[None].to(device) if s1_np is not None else None
+    if upsample > 1:
+        f = float(upsample)
+        s2_t = torch.nn.functional.interpolate(s2_t, scale_factor=f, mode="bicubic",
+                                               align_corners=False)
+        if s1_t is not None:
+            s1_t = torch.nn.functional.interpolate(s1_t, scale_factor=f, mode="bilinear",
+                                                   align_corners=False)
+    x = ({m: (s2_t if m == "S2L2A" else s1_t) for m in mods} if "S1RTC" in mods else s2_t)
+    with torch.no_grad(), torch.autocast(device_type=device, enabled=device == "cuda"):
+        out = task(x)
+        logits = out.output if hasattr(out, "output") else out
+        prob = torch.softmax(logits, dim=1)[:, 1:2]
+    if upsample > 1:
+        prob = torch.nn.functional.interpolate(prob, size=s2_np.shape[-2:], mode="bilinear",
+                                               align_corners=False)
+    return prob[0, 0].float().cpu().numpy()
+
+
+def run_inference(
+    aoi: str, checkpoint: Path, out_dir: Path, only_built: bool = True, limit: int = 0,
+    upsample: int = 1,
+) -> Path:
+    """`upsample` must match the checkpoint's training-time `data.upsample` (see
+    configs/terramind_sub_v12_up2_s2only.yaml) -- it is not recoverable from the
+    checkpoint itself, since it's a datamodule setting, not a task hyperparameter."""
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
     settings = Settings.load()
     _, cfg = resolve_aoi(aoi, settings)
@@ -82,8 +117,9 @@ def run_inference(
     comp_idx = CompositeIndex(composed)
     task, device = load_model(checkpoint)
     dual = _is_dual(task)
-    log.info("Inference on %s: %d cells, modalities=%s", aoi, len(comp_idx.index),
-             "S2+S1" if dual else "S2")
+    mods = ["S2L2A", "S1RTC"] if dual else ["S2L2A"]
+    log.info("Inference on %s: %d cells, modalities=%s, upsample=%dx", aoi, len(comp_idx.index),
+             "S2+S1" if dual else "S2", upsample)
 
     if dual:
         missing = [p for p in comp_idx.index.path
@@ -131,17 +167,9 @@ def run_inference(
                     h, w = min(CHIP_SIZE, H - r), min(CHIP_SIZE, W - c)
                     if (arr[:, :h, :w] > 0).mean() < 0.2:  # skip mostly-nodata windows
                         continue
-                    s2 = torch.from_numpy(arr.astype("float32") / 10000.0)[None].to(device)
-                    if src1 is not None:
-                        s1raw = src1.read(window=win, boundless=True, fill_value=0)[:2]
-                        s1 = torch.from_numpy(_standardize_s1(s1raw))[None].to(device)
-                        x = {"S2L2A": s2, "S1RTC": s1}
-                    else:
-                        x = s2
-                    with torch.no_grad(), torch.autocast(device_type=device, enabled=device == "cuda"):
-                        out = task(x)
-                        logits = out.output if hasattr(out, "output") else out
-                        prob = torch.softmax(logits, dim=1)[0, 1].float().cpu().numpy()
+                    s1raw = src1.read(window=win, boundless=True, fill_value=0)[:2] if src1 else None
+                    prob = predict_window(task, mods, device, arr.astype("float32"), s1raw,
+                                          upsample=upsample)
                     acc[r : r + h, c : c + w] += prob[:h, :w] * hann[:h, :w]
                     wacc[r : r + h, c : c + w] += hann[:h, :w]
                     valid_any[r : r + h, c : c + w] |= (arr[:, :h, :w] > 0).any(axis=0)

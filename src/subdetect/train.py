@@ -63,9 +63,10 @@ def run_training(config: Path, smoke: bool = False) -> Path:
         state = torch.load(cfg["init_weights_from"], map_location="cpu")["state_dict"]
         task.load_state_dict(state)
         log.info("Initialized weights from %s", cfg["init_weights_from"])
-    # Recall-first: monitor balanced (macro) recall = val/Accuracy (MulticlassAccuracy
-    # macro = mean per-class recall) instead of mIoU. Overridable via config.
-    monitor = cfg.get("monitor", "val/mIoU")
+    # Default to foreground IoU (val/IoU_1), not mIoU: mIoU averages in the background
+    # class's IoU, which sits near 1.0 on a mostly-negative val split and swamps the
+    # substation-detection signal we actually care about. Overridable via config.
+    monitor = cfg.get("monitor", "val/IoU_1")
     mode = cfg.get("monitor_mode", "max")
     callbacks = [
         ModelCheckpoint(
