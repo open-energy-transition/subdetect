@@ -15,9 +15,10 @@ from pathlib import Path
 import rasterio
 from tqdm import tqdm
 
-from subdetect.config import LOCAL_BANDS, S1_BANDS, Settings, resolve_aoi
+from subdetect.config import LOCAL_BANDS, S1_BANDS, TOWER_PRIOR_BANDS, Settings, resolve_aoi
 from subdetect.imagery import annual_composite, s1_composite
 from subdetect.roi import CELL_DEG, select_cells
+from subdetect.tower_prior import tower_prior_dn
 
 
 def run_compose(
@@ -42,8 +43,9 @@ def run_compose(
         cells = cells.head(limit)
     s2_window = tuple(settings.raw.get("s2_window", ("2025-11-01", "2026-03-15")))
     s1_window = tuple(settings.raw.get("s1_window", ("2025-11-01", "2026-03-15")))
-    layer = "composite_0.tif" if sensor == "s2" else "composite_s1.tif"
-    bands = LOCAL_BANDS if sensor == "s2" else S1_BANDS
+    layer = {"s2": "composite_0.tif", "s1": "composite_s1.tif",
+             "towerprior": "composite_tower.tif"}[sensor]
+    bands = {"s2": LOCAL_BANDS, "s1": S1_BANDS, "towerprior": TOWER_PRIOR_BANDS}[sensor]
     log.info("Compositing %s for %d cells of %s (%d workers) -> %s",
              sensor.upper(), len(cells), aoi, workers, layer)
 
@@ -56,7 +58,7 @@ def run_compose(
         try:
             if sensor == "s2":
                 res = annual_composite(bbox, date_range=s2_window)
-            else:
+            elif sensor == "s1":
                 # S1 pins to the cell's S2 grid so VV/VH align with composite_0 exactly.
                 base = cell_dir / "composite_0.tif"
                 if not base.exists():
@@ -66,6 +68,14 @@ def run_compose(
                 with rasterio.open(base) as b:
                     gbox = GeoBox((b.height, b.width), b.transform, b.crs)
                 res = s1_composite(bbox, date_range=s1_window, geobox=gbox)
+            else:  # towerprior: pure post-processing of the already-composited S1 layer,
+                # no STAC fetch — same grid as composite_s1.tif, so co-registration is free.
+                base = cell_dir / "composite_s1.tif"
+                if not base.exists():
+                    return False
+                with rasterio.open(base) as b:
+                    s1_arr = b.read()
+                    res = (tower_prior_dn(s1_arr), b.transform, b.crs)
         except Exception as e:  # noqa: BLE001 — one bad cell must not kill the run
             logging.getLogger(__name__).warning("cell %s failed: %s", cell["name"], e)
             return False

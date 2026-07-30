@@ -203,6 +203,7 @@ def _split_of(lon: float, lat: float, cfg: dict) -> str:
 
 def build_chips(
     aoi: str, labels_dir: Path, out_dir: Path, limit: int = 0, with_s1: bool = False,
+    with_tower: bool = False,
     min_area_m2: float | None = None, prefer_refined: bool = True, voltage_only: bool = False,
     voltage_weight: int = 1,
 ) -> Path:
@@ -226,6 +227,8 @@ def build_chips(
     (out_dir / "masks").mkdir(parents=True, exist_ok=True)
     if with_s1:
         (out_dir / "s1").mkdir(parents=True, exist_ok=True)
+    if with_tower:
+        (out_dir / "tower").mkdir(parents=True, exist_ok=True)
 
     composed = Path("data/composites") / aoi
     if not (composed.exists() and any(composed.glob("composites/*/composite_0.tif"))):
@@ -256,6 +259,7 @@ def build_chips(
         img_path = out_dir / "images" / f"{cid}.tif"
         mask_path = out_dir / "masks" / f"{cid}.tif"
         s1_path = out_dir / "s1" / f"{cid}.tif" if with_s1 else None
+        tower_path = out_dir / "tower" / f"{cid}.tif" if with_tower else None
         tile = _tile_of(row.lon, row.lat, comp_idx)
         try:
             if not (img_path.exists() and mask_path.exists()):
@@ -283,6 +287,18 @@ def build_chips(
                 s1arr, ox, oy = _crop(s1arr, CHIP_SIZE)
                 s1t = s1t * rasterio.Affine.translation(ox, oy)
                 _write_tif(s1_path, s1arr, s1t, s1crs, "uint16")
+            if with_tower and tower_path is not None and not tower_path.exists():
+                try:
+                    tres = comp_idx.read_window(_chip_bbox(row.lon, row.lat), "composite_tower.tif")
+                except FileNotFoundError:
+                    return None  # tower prior not composited for this cell yet
+                if tres is None:
+                    return None
+                tarr, tt, tcrs = tres
+                tarr = tarr[:1]
+                tarr, ox, oy = _crop(tarr, CHIP_SIZE)
+                tt = tt * rasterio.Affine.translation(ox, oy)
+                _write_tif(tower_path, tarr, tt, tcrs, "uint16")
         except Exception as e:  # noqa: BLE001 — one bad chip must not kill the run
             log.warning("chip %s failed: %s", cid, e)
             return None
@@ -291,6 +307,7 @@ def build_chips(
         return dict(chip_id=cid, lon=row.lon, lat=row.lat, kind=row.kind, tile=tile,
                     split=_split_of(row.lon, row.lat, cfg), sub_pixels=int((band == 1).sum()),
                     image=str(img_path), s1=str(s1_path) if s1_path else None,
+                    tower=str(tower_path) if tower_path else None,
                     mask=str(mask_path))
 
     records = [r for r in (_build_one(row) for _, row in tqdm(

@@ -19,6 +19,7 @@ from lightning import LightningDataModule
 from torch.utils.data import DataLoader, Dataset
 
 from subdetect.config import S1_MEAN, S1_OFFSET_DB, S1_SCALE, S1_STD
+from subdetect.tower_prior import DN_SCALE as _TOWER_DN_SCALE
 
 # S2 chips store reflectance DN (x10000); the backbone is fine-tuned on reflectance in
 # [0, ~1.5] (no internal standardization). S1 is standardized to the pretrain dB stats.
@@ -38,12 +39,27 @@ def _load_s1(path: str) -> np.ndarray:
     return x
 
 
+def _load_tower(path: str) -> np.ndarray:
+    """Read the tower-prior uint16 DN chip -> [0, 1] float32, nodata (DN==0) -> 0.0.
+
+    Already bounded in [0, 1] (see tower_prior.tower_prior_dn) -- no standardization,
+    same convention as reflectance-scale S2 fed to a backbone with no internal norm."""
+    with rasterio.open(path) as src:
+        dn = src.read().astype("float32")  # (1, H, W)
+    nodata = dn <= 0
+    x = np.clip((dn - 1.0) / _TOWER_DN_SCALE, 0.0, 1.0)
+    x[nodata] = 0.0
+    return x
+
+
 class SubChipDataset(Dataset):
     def __init__(self, index: pd.DataFrame, modalities: list[str], augment: bool = False,
                  upsample: int = 1):
         self.index = index.reset_index(drop=True)
         self.modalities = modalities
-        self.dual = "S1RTC" in modalities
+        self.has_s1 = "S1RTC" in modalities
+        self.has_tower = "power_tower_prior" in modalities
+        self.dual = self.has_s1 or self.has_tower
         self.augment = augment
         # upsample > 1: bicubic-upsample inputs (nearest for the mask) so a small
         # substation spans more ViT tokens. Adds no information -- it attacks the
@@ -60,7 +76,8 @@ class SubChipDataset(Dataset):
             s2 = src.read().astype("float32") / DN_SCALE  # (10, H, W)
         with rasterio.open(row["mask"]) as src:
             mask = src.read(1).astype("int64")
-        s1 = _load_s1(row["s1"]) if self.dual else None
+        s1 = _load_s1(row["s1"]) if self.has_s1 else None
+        tower = _load_tower(row["tower"]) if self.has_tower else None
 
         if self.augment:
             k = np.random.randint(4)
@@ -69,14 +86,19 @@ class SubChipDataset(Dataset):
             mask = np.rot90(mask, k, (0, 1)).copy()
             if s1 is not None:
                 s1 = np.rot90(s1, k, (1, 2)).copy()
+            if tower is not None:
+                tower = np.rot90(tower, k, (1, 2)).copy()
             if flip:
                 s2 = s2[:, :, ::-1].copy()
                 mask = mask[:, ::-1].copy()
                 if s1 is not None:
                     s1 = s1[:, :, ::-1].copy()
+                if tower is not None:
+                    tower = tower[:, :, ::-1].copy()
 
         s2_t, mask_t = torch.from_numpy(s2), torch.from_numpy(mask)
         s1_t = torch.from_numpy(s1) if s1 is not None else None
+        tower_t = torch.from_numpy(tower) if tower is not None else None
         if self.upsample > 1:
             f = float(self.upsample)
             s2_t = torch.nn.functional.interpolate(
@@ -84,12 +106,19 @@ class SubChipDataset(Dataset):
             if s1_t is not None:
                 s1_t = torch.nn.functional.interpolate(
                     s1_t[None], scale_factor=f, mode="bilinear", align_corners=False)[0]
+            if tower_t is not None:
+                tower_t = torch.nn.functional.interpolate(
+                    tower_t[None], scale_factor=f, mode="bilinear", align_corners=False)[0]
             mask_t = torch.nn.functional.interpolate(
                 mask_t[None, None].float(), scale_factor=f, mode="nearest")[0, 0].long()
         if self.dual:
-            img = {"S1RTC": s1_t}
+            img = {}
             if "S2L2A" in self.modalities:
                 img["S2L2A"] = s2_t
+            if self.has_s1:
+                img["S1RTC"] = s1_t
+            if self.has_tower:
+                img["power_tower_prior"] = tower_t
             return {"image": img, "mask": mask_t}
         return {"image": s2_t, "mask": mask_t}
 

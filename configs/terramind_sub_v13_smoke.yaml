@@ -1,0 +1,49 @@
+# Throwaway smoke-test copy of terramind_sub_v13_towerprior.yaml -- separate
+# checkpoint_dir so a 50-step --smoke run doesn't write a last.ckpt into the real
+# stageA_v13_towerprior dir (train.py auto-resumes from last.ckpt, which would corrupt
+# the real multi-hour run). Delete data/models/_smoke_v13 once done comparing.
+data:
+  index_path: data/chips_v5/combined_tower/index.parquet
+  batch_size: 4
+  num_workers: 4
+  modalities: [S2L2A, S1RTC, power_tower_prior]
+
+task:
+  model_factory: EncoderDecoderFactory
+  model_args:
+    backbone: terramind_v1_tiny
+    backbone_pretrained: true
+    backbone_modalities: [S2L2A, S1RTC, {power_tower_prior: 1}]
+    backbone_bands:
+      S2L2A: [BLUE, GREEN, RED, RED_EDGE_1, RED_EDGE_2, RED_EDGE_3,
+              NIR_BROAD, NIR_NARROW, SWIR_1, SWIR_2]
+      S1RTC: [VV, VH]
+    backbone_modality_drop_rate: 0.1
+    necks:
+      - name: SelectIndices
+        indices: [2, 5, 8, 11]
+      - name: ReshapeTokensToImage
+        remove_cls_token: false
+      - name: LearnedInterpolateToPyramidal
+    decoder: UNetDecoder
+    decoder_channels: [256, 128, 64, 32]
+    num_classes: 2
+    rescale: true
+  loss: tversky
+  tversky_args: {alpha: 0.35, beta: 0.65, gamma: 1.33}
+  class_weights: [0.25, 0.75]
+  ignore_index: -1
+  lr: 1.0e-4
+  optimizer: AdamW
+  optimizer_hparams:
+    weight_decay: 0.05
+  freeze_backbone: false
+  plot_on_val: false
+
+trainer:
+  max_epochs: 60
+  accumulate_grad_batches: 4
+
+checkpoint_dir: data/models/_smoke_v13
+patience: 15
+monitor_mode: max

@@ -47,7 +47,9 @@ def roi(
 @app.command()
 def compose(
     aoi: str = typer.Option(..., help="AOI name"),
-    sensor: str = typer.Option("s2", help="s2 (composite_0.tif) or s1 (composite_s1.tif)"),
+    sensor: str = typer.Option(
+        "s2", help="s2 (composite_0.tif), s1 (composite_s1.tif), or towerprior "
+                   "(composite_tower.tif -- derived from an existing composite_s1.tif, no STAC fetch)"),
     out_dir: Path = typer.Option(Path("data/composites")),
     radius_km: float = typer.Option(20.0, help="ROI radius (Pakistan; India uses max_train_cells)"),
     min_voltage: float = typer.Option(0.0),
@@ -68,6 +70,9 @@ def chips(
     out_dir: Path = typer.Option(Path("data/chips")),
     limit: int = typer.Option(0, help="Cap number of chips (0 = no cap; for smoke tests)"),
     s1: bool = typer.Option(False, "--s1", help="Also write co-registered S1 chips (needs S1 composites)"),
+    tower: bool = typer.Option(
+        False, "--tower", help="Also write co-registered S1 tower-prior chips (needs "
+                                "compose --sensor towerprior)"),
     min_area_m2: float = typer.Option(
         None, help="Override the label floor for training masks (0 = no size floor)"),
     prefer_refined: bool = typer.Option(
@@ -81,8 +86,8 @@ def chips(
     from subdetect.chips import build_chips
 
     build_chips(aoi=aoi, labels_dir=labels_dir, out_dir=out_dir, limit=limit, with_s1=s1,
-                min_area_m2=min_area_m2, prefer_refined=prefer_refined, voltage_only=voltage_only,
-                voltage_weight=voltage_weight)
+                with_tower=tower, min_area_m2=min_area_m2, prefer_refined=prefer_refined,
+                voltage_only=voltage_only, voltage_weight=voltage_weight)
 
 
 @app.command()

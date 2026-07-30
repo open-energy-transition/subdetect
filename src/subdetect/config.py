@@ -43,6 +43,11 @@ S1_STD = [4.391, 4.459]
 S1_OFFSET_DB = 50.0
 S1_SCALE = 500.0
 
+# S1-derived power-tower proximity prior (see tower_prior.py) -- single extra band,
+# derived from composite_s1.tif per cell, never fused with S2. Untried as a model
+# input before 2026-07-24; previously only used as a post-hoc lead-ranking feature.
+TOWER_PRIOR_BANDS = ["tower_prior"]
+
 # One full year of observations (unused for substations but kept for API parity).
 SEASONS = {
     "spring": ("2025-03-01", "2025-05-31"),

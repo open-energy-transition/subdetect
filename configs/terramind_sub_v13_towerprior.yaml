@@ -1,0 +1,73 @@
+# v13: adds an S1-derived power-tower proximity prior as a THIRD model input
+# modality (power_tower_prior, 1 channel), on top of v5_s1fusion's exact
+# arch/loss/schedule -- the only change is the extra input channel + its index
+# (data/chips_v5/combined_tower/index.parquet, same chips as chips_v5/combined
+# with a co-registered `tower` layer backfilled, see tower_prior.py).
+#
+# Motivation: docs/issues/s1-tower-chain-corridor-evidence.md validated (2026-07-19)
+# that S1-derived isolated bright points (tower signatures) are a strong POST-HOC
+# lead-ranking signal (iso_towers_1km alone AUC 0.860 on sindh_test, zero OSM
+# dependence) but that signal has never been given to the segmentation model
+# itself -- towers/chains operate at 1-5 km scale, beyond the 224 px (~2.2 km)
+# receptive field, so the doc explicitly says this "must enter as a precomputed
+# raster channel ... the U-Net cannot learn it from chips". This config is that
+# experiment. See memory subdetect-tower-s1-priors.
+#
+# Architecture note: TerraMind's pretrained S1RTC patch embed is a fixed 2-channel
+# (VV, VH) tensor -- you cannot just concatenate a 3rd raw channel onto it without
+# breaking the pretrained weights. Verified via terratorch's dict-modality path
+# (terramind.py build_modality_embeddings): declaring `{power_tower_prior: 1}` in
+# backbone_modalities gives it its OWN randomly-initialized patch embed, while
+# S2L2A/S1RTC keep their pretrained weights untouched (checkpoint_filter_fn just
+# warns-and-skips missing keys). CPU smoke test (2026-07-24, no GPU touched):
+# model builds, forward pass gives correct (B, 2, 224, 224) output, new-modality
+# params confirmed present and randomly initialized.
+#
+# NOT YET LAUNCHED (2026-07-24): v12_up2 is still training on the only GPU.
+# Compare against v5_s1fusion (NOT v9/v11b, which are S2-only and have no S1/tower
+# chips) since this changes exactly one variable relative to that baseline.
+data:
+  index_path: data/chips_v5/combined_tower/index.parquet
+  batch_size: 4
+  num_workers: 4
+  modalities: [S2L2A, S1RTC, power_tower_prior]
+
+task:
+  model_factory: EncoderDecoderFactory
+  model_args:
+    backbone: terramind_v1_tiny
+    backbone_pretrained: true
+    backbone_modalities: [S2L2A, S1RTC, {power_tower_prior: 1}]
+    backbone_bands:
+      S2L2A: [BLUE, GREEN, RED, RED_EDGE_1, RED_EDGE_2, RED_EDGE_3,
+              NIR_BROAD, NIR_NARROW, SWIR_1, SWIR_2]
+      S1RTC: [VV, VH]
+    backbone_modality_drop_rate: 0.1
+    necks:
+      - name: SelectIndices
+        indices: [2, 5, 8, 11]
+      - name: ReshapeTokensToImage
+        remove_cls_token: false
+      - name: LearnedInterpolateToPyramidal
+    decoder: UNetDecoder
+    decoder_channels: [256, 128, 64, 32]
+    num_classes: 2
+    rescale: true
+  loss: tversky
+  tversky_args: {alpha: 0.35, beta: 0.65, gamma: 1.33}
+  class_weights: [0.25, 0.75]
+  ignore_index: -1
+  lr: 1.0e-4
+  optimizer: AdamW
+  optimizer_hparams:
+    weight_decay: 0.05
+  freeze_backbone: false
+  plot_on_val: false
+
+trainer:
+  max_epochs: 60
+  accumulate_grad_batches: 4
+
+checkpoint_dir: data/models/stageA_v13_towerprior
+patience: 15
+monitor_mode: max
