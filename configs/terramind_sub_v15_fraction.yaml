@@ -1,0 +1,101 @@
+# v15 fraction: the earthpv fraction-regression head, ported to substations.
+#
+# ONE variable vs v11b_s2only: the target representation. Same backbone/necks/decoder,
+# same chip centres, same imagery, same train/val split (the index is v11b's, with only
+# the mask paths repointed -- see scripts/build_reburn_chip_index.py). What changes is
+# that a pixel's target is its true sub-pixel substation coverage in [0, 1] instead of a
+# hard class id, and the head is a 1-channel sigmoid regression head instead of a 2-class
+# softmax.
+#
+# Hypothesis. The binary masks are burned with `all_touched=True`, which inflates a
+# polygon by roughly its perimeter in pixels: measured on 502 real installations, 1.70x in
+# the 1,000-2,000 m2 bucket against 1.13x at >=20,000 m2. So the segmentation head has
+# always been trained on a footprint whose bias varies monotonically with size, worst
+# exactly where recall dies -- the 1,000-2,000 m2 bucket has read 0% recall in every model
+# to date (docs/model-lineage.md, scripts/eval_small_subs.py) and has been attributed to a
+# resolution floor. Some of that "floor" may be supervision noise. `_burn_fraction`
+# supersamples 10x before block-meaning, so the target is honest at every size.
+#
+# READ v16_honestburn FIRST. That arm removes the same bias with a one-token change
+# (all_touched=False) and nothing else -- still a two-class mask, so thresholds, hysteresis
+# seeds and the fusion formula all keep their meaning. It is the cheap decisive test of
+# whether the floor is supervision noise. This config's extra ingredient over v16 is
+# genuine SUB-PIXEL targets, so the comparison that isolates the fraction head's own
+# contribution is v15 vs v16, not v15 vs v11b. If v16 moves the small bucket and v15 does
+# not beat it, the regression head is not earning the downstream disruption it causes.
+#
+# Calibration from the source project: earthpv rated its fraction head PARTIAL, never
+# promoted -- it beat segmentation on small arrays by 23x in one residential quadrat, but a
+# later retrain showed the gain is regime-specific (better on large/industrial, worse on
+# dense small). Substations are also much less sub-pixel than rooftop PV (median Pakistan
+# polygon 4,274 m2 = ~43 px, against ~50 m2 = half a pixel for PV), so the mechanism that
+# won there is weaker here and the rasterization-bias mechanism above is the real bet.
+#
+# How to judge. NOT val/RMSE, which is dominated by getting the background zeros right --
+# it is only the checkpoint-selection monitor. Judge on scripts/eval_small_subs.py size
+# buckets and scripts/field_eval.py on sindh_test, against v11b_s2only and v12_up2.
+# Note the threshold does NOT transfer across heads: 0.3 on a class probability means
+# "30% confident", 0.3 on this raster means "30% of the pixel is substation". Sweep it.
+#
+# Corpus caveat. 26,496 of 32,921 chips are TorchGeo, which has no source polygons on
+# disk, so those keep hard {0, 1} targets -- ~80% of the corpus supplies no sub-pixel
+# information. That is the price of an exactly matched A/B. If this run comes back
+# neutral, build the complementary arm before concluding anything:
+#   python scripts/build_reburn_chip_index.py --target fraction --osm-only --out-root data/chips_v15_fraction_osm
+# which keeps only the genuinely sub-pixel-supervised chips plus hard negatives.
+task_type: regression
+
+data:
+  index_path: data/chips_v15_fraction/combined/index.parquet
+  batch_size: 8
+  num_workers: 4
+  modalities: [S2L2A]
+  # SubChipDataset reads masks as float32 fractions instead of int64 class ids.
+  target: fraction
+
+task:
+  model_factory: EncoderDecoderFactory
+  model_args:
+    backbone: terramind_v1_tiny
+    backbone_pretrained: true
+    backbone_modalities: [S2L2A]
+    backbone_bands:
+      S2L2A: [BLUE, GREEN, RED, RED_EDGE_1, RED_EDGE_2, RED_EDGE_3,
+              NIR_BROAD, NIR_NARROW, SWIR_1, SWIR_2]
+    necks:
+      - name: SelectIndices
+        indices: [2, 5, 8, 11]
+      - name: ReshapeTokensToImage
+        remove_cls_token: false
+      - name: LearnedInterpolateToPyramidal
+    decoder: UNetDecoder
+    decoder_channels: [256, 128, 64, 32]
+    # No num_classes: RegressionHead defaults to 1 output channel, and its ABSENCE is
+    # also how infer.py/evaluate.py sniff a checkpoint's task type.
+    head_final_act: torch.nn.Sigmoid
+    rescale: true
+  # Plain MSE/Huber collapse to predict-zero under the heavy zero-inflation of a fraction
+  # target; weighted_mse (train.py -> subdetect.losses) scales the loss by (1 + k*target).
+  # under_weight > 1 would carry over the Tversky beta>alpha recall-first asymmetry by
+  # penalising under-prediction harder; left at 1.0 so this run is a faithful port of
+  # earthpv's proven recipe with only the target changed. Tune it in a follow-up, not here.
+  loss: weighted_mse
+  weighted_mse_args: {k: 10.0, under_weight: 1.0}
+  ignore_index: -1
+  lr: 1.0e-4
+  optimizer: AdamW
+  optimizer_hparams:
+    weight_decay: 0.05
+  freeze_backbone: false
+  plot_on_val: false
+
+trainer:
+  max_epochs: 60
+  accumulate_grad_batches: 2
+
+checkpoint_dir: data/models/stageA_v15_fraction
+patience: 15
+# PixelwiseRegressionTask logs val/RMSE, val/MSE, val/MAE, val/R2_Score, val/loss -- no
+# IoU, so val/IoU_1 (the segmentation default) does not exist here.
+monitor: val/RMSE
+monitor_mode: min

@@ -205,6 +205,68 @@ m² bucket. That gap — not label purity, not voltage tags — is the largest
 still-open lever in this project; see [Expanding the training data](expanding-training-data.md)
 for what's been tried against it so far.
 
+### Fixing it again: `eval_version` 2 (2026-08-15)
+
+`field_eval` removed the moving-target problem but carried two defects of its own,
+both found by `scripts/diagnose_missed_large.py`, which asks *where* a missed
+substation is lost rather than only whether it was found.
+
+**The recall denominator was a bounding box.** Ground truth was selected with
+`v2f.total_bounds` — the bounding box of surviving candidates. But the inferred
+area is a ragged set of ROI-selected cells, not a rectangle. On `sindh_test`,
+**53 of ~163 substations (roughly a third) were never covered by any probability
+raster** and were counted as misses anyway, including the region's two largest
+(211,000 and 185,000 m²) and one sitting 51 km outside the nearest inferred cell.
+Worse, the box is candidate-dependent, so the denominator moved between runs:
+`n_20000-inf` was 21 for some rows and 19 for others in the same region, meaning
+recall figures were not strictly comparable to each other — the exact failure
+`field_eval` was built to end.
+
+**One constant was doing two jobs.** `settings.min_sub_area_m2` (20,000 m², the
+*label* floor) was also the *candidate* filter. A component had to be as large as
+the biggest ground-truth bucket to count at all, so any substation below 20,000 m²
+could only be detected via an over-predicted footprint. That filter was discarding
+20 correctly-detected substations whose components carried a median peak
+probability of **0.53**.
+
+Both are fixed: `postprocess.raster_coverage()` builds the denominator from the
+actual raster footprints (membership by centroid, in an equal-area CRS), and
+`MIN_CAND_AREA_M2` (1,000 m²) is now independent of the label floor. Rows carry
+`eval_version` and `min_cand_area_m2`; **only compare rows of equal
+`eval_version`.** The v1 history is preserved in the same CSV and in
+`field_eval_v1_backup.csv`.
+
+All 23 historical runs were re-baselined from the prob rasters on disk. Every run
+gained; the production model as an example:
+
+| bucket | v1 | v2 |
+|---|---|---|
+| 1,000–2,000 m² | 0.000 | 0.000 |
+| 2,000–5,000 m² | 0.066 | **0.256** |
+| 5,000–20,000 m² | 0.328 | **0.700** |
+| ≥20,000 m² | 0.526 | **0.714** |
+
+P@50 rose 0.64 → 0.74 and candidates 223 → 650. AUC fell 0.955 → 0.868, which is
+expected rather than a regression: the ranking task is now over a much larger and
+harder candidate set, and the old number was flattered by a filter that had
+already deleted most of the difficult cases.
+
+**What survives the correction, and what does not.** Precision-style rankings are
+stable across the 23 runs (Spearman ρ = 0.94 on P@50, 0.94 on P@20, 0.91 on AUC),
+so conclusions in this document that rest on P@50 stand — including the promotion
+of `v12_up2_mean_fusion`, which remains best on P@50 and gains the 5,000–20,000 m²
+crown. Recall-based orderings are considerably less stable (ρ = 0.67–0.74), and
+the best-by-recall run changes for three of four buckets: 5,000–20,000 m² was v7,
+now v12_up2_mean_fusion; ≥20,000 m² was v5_s1only, now v6c. **Any recall-based
+claim in this document that predates 2026-08-15 should be re-read against the v2
+rows**, and the models were consistently better than the v1 numbers reported.
+
+One thing the correction does not touch: the 1,000–2,000 m² bucket reads **0.000
+in all 23 runs** under v2 as under v1, on n = 9. Neither defect was masking that
+floor, and `diagnose_missed_large.py` shows why — nine of nine are `lost:silent`
+with a peak probability inside the polygon of exactly 0.000. The model does not
+respond weakly there; it does not respond at all.
+
 ## v9: growing the data-starved S2-only arm
 
 Every v6–v8 experiment touched the S1 arm's chip index; the S2-only arm —
@@ -276,3 +338,73 @@ real Pakistan substation labels:
   signal measured in this project.
 
 Full detail and the output-column reference: [Osmose-guided detection](osmose-detect.md).
+
+## A label bias nobody had measured, and the two arms testing it
+
+Porting `earthpv`'s fraction-regression head (2026-08-15) turned up something more
+basic than the head itself. `chips.py::_burn_mask` has always rasterized positives
+with `all_touched=True`, which marks every pixel the polygon touches. Measured on
+502 real installations lying entirely inside a training chip, comparing burned
+pixel area against true geodesic area:
+
+| bucket | n | `all_touched=True` | centre-in | 10x supersampled |
+|---|---|---|---|---|
+| 1,000–2,000 m² | 38 | **1.70x** | 0.98x | 1.00x |
+| 2,000–5,000 m² | 139 | 1.47x | 1.00x | 1.00x |
+| 5,000–20,000 m² | 132 | 1.29x | 1.00x | 1.00x |
+| ≥20,000 m² | 144 | 1.13x | 1.00x | 1.00x |
+
+Every checkpoint in this document was trained on a footprint whose bias varies
+monotonically with size, worst in exactly the bucket that has read **0% recall in
+every model tested** and has been attributed to a resolution floor. Whether some of
+that "floor" is supervision noise rather than optics is now a testable question.
+
+Both arms re-burn the masks of the **existing v11b index in place**
+(`scripts/build_reburn_chip_index.py`), leaving imagery, chip centres and the
+train/val split byte-identical, so each is a one-variable A/B. Before re-burning
+anything the script reconstructs a sample of masks the original way and requires an
+exact match, which is what proves the label settings match the corpus (they do: raw
+OSM labels, no size floor — 12/12 exact on both AOIs).
+
+**v16_honestburn — run and read this one first.** `all_touched=False` and nothing
+else. Still a two-class mask, still Tversky, still a probability raster out, so
+every downstream constant keeps its meaning: the 0.3 threshold, the hysteresis
+seeds, the fusion formula. A win here ships with no integration work.
+
+**v15_fraction — the ported head.** Float32 sub-pixel coverage in [0, 1] against a
+1-channel sigmoid regression head with a zero-inflation-weighted MSE. It removes
+the same bias *and* adds genuine sub-pixel targets. The comparison that isolates
+its own contribution is therefore **v15 against v16**, not v15 against v11b.
+
+### Temper the expectation
+
+Removing the inflation drops positive pixels only 754,542 → 669,847 (−11.2%) across
+the re-burned chips, and −1.0% corpus-wide. The pixel total — and therefore the loss
+— is dominated by large substations, which were only ~1.13x inflated. The 1.70x
+correction lands on the smallest installations, which contribute a negligible share
+of pixels. So these arms nudge the aggregate gradient by ~11% while fixing the
+labels of precisely the class that has never been detected. That is a narrower bet
+than the 1.70x headline suggests, and it is the honest way to read a null result.
+
+Two further caveats. Four of 3,684 re-burned chips lose their positives entirely
+(sliver polygons whose centres miss every pixel) and become negative-only — a tiny
+second label change beyond the bias fix. And 26,496 of the 32,921 chips come from
+the TorchGeo Substation dataset, whose source polygons are not on disk: under v16
+they keep their original masks untouched, and under v15 they are cast to hard
+{0, 1}, so ~80% of the fraction corpus supplies no sub-pixel information. If v15
+comes back neutral, `--target fraction --osm-only` builds the complementary arm
+before concluding the target representation does not help.
+
+### How to judge
+
+Not `val/IoU_1` or `val/RMSE` — positive pixel counts change, so IoU is not
+comparable to v11b even with an identical split, and RMSE is dominated by
+background zeros. Both are checkpoint-selection monitors only. Judge on
+`scripts/eval_small_subs.py` size buckets and `scripts/field_eval.py` on
+`sindh_test`. The decision threshold does not transfer between heads: 0.3 on a
+class probability means "30% confident", 0.3 on a fraction raster means "30% of
+this pixel is substation". And given the v8 episode (P@50 0.45 → 0.05 on an
+identical reseed), a positive result needs a reseed control before it is believed.
+
+Neither arm has been trained as of this writing; this section records the
+measurement and the experiment design.

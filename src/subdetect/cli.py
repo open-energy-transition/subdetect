@@ -81,13 +81,17 @@ def chips(
         False, help="Only train on substations with a valid OSM voltage tag"),
     voltage_weight: int = typer.Option(
         1, help="Oversample voltage-tagged substations by this factor (chip-level, keeps untagged ones)"),
+    fraction: bool = typer.Option(
+        False, "--fraction", help="Burn continuous sub-pixel coverage-fraction masks "
+                                  "(float32 regression target) instead of binary class masks; "
+                                  "writes to a parallel <aoi>_fraction/ tree"),
 ) -> None:
     """Sample training chips: composite windows + burned substation masks."""
     from subdetect.chips import build_chips
 
     build_chips(aoi=aoi, labels_dir=labels_dir, out_dir=out_dir, limit=limit, with_s1=s1,
                 with_tower=tower, min_area_m2=min_area_m2, prefer_refined=prefer_refined,
-                voltage_only=voltage_only, voltage_weight=voltage_weight)
+                voltage_only=voltage_only, voltage_weight=voltage_weight, fraction=fraction)
 
 
 @app.command()

@@ -24,23 +24,41 @@ def run_training(config: Path, smoke: bool = False) -> Path:
 
     dm = SubDataModule(**cfg["data"])
     task_args = dict(cfg["task"])
-    if task_args.get("loss") == "tversky":
-        # TerraTorch has no built-in Tversky, but SemanticSegmentationTask accepts a loss
-        # nn.Module. Tversky with beta>alpha penalises false negatives (missed substations)
-        # harder than false positives -> recall-first. With a module loss the task's
-        # class_weights is inactive (alpha/beta do the class weighting), so drop it.
-        import segmentation_models_pytorch as smp
+    task_type = cfg.get("task_type", "segmentation")
+    if task_type == "regression":
+        from terratorch.tasks import PixelwiseRegressionTask
 
-        ta = task_args.pop("tversky_args", None) or {}
-        task_args.pop("class_weights", None)
-        task_args["loss"] = smp.losses.TverskyLoss(
-            mode="multiclass",
-            ignore_index=task_args.get("ignore_index", -1),
-            alpha=ta.get("alpha", 0.3),
-            beta=ta.get("beta", 0.7),
-            gamma=ta.get("gamma", 1.0),
-        )
-    task = SemanticSegmentationTask(**task_args)
+        if task_args.get("loss") == "weighted_mse":
+            # Counters the zero-inflation of a fraction target; see subdetect.losses. Like
+            # the tversky branch below, PixelwiseRegressionTask accepts a loss nn.Module.
+            from subdetect.losses import TargetWeightedMSE
+
+            wa = task_args.pop("weighted_mse_args", None) or {}
+            task_args["loss"] = TargetWeightedMSE(
+                k=wa.get("k", 10.0),
+                ignore_index=task_args.get("ignore_index", -1),
+                under_weight=wa.get("under_weight", 1.0),
+            )
+        task = PixelwiseRegressionTask(**task_args)
+    else:
+        if task_args.get("loss") == "tversky":
+            # TerraTorch has no built-in Tversky, but SemanticSegmentationTask accepts a
+            # loss nn.Module. Tversky with beta>alpha penalises false negatives (missed
+            # substations) harder than false positives -> recall-first. With a module loss
+            # the task's class_weights is inactive (alpha/beta do the class weighting), so
+            # drop it.
+            import segmentation_models_pytorch as smp
+
+            ta = task_args.pop("tversky_args", None) or {}
+            task_args.pop("class_weights", None)
+            task_args["loss"] = smp.losses.TverskyLoss(
+                mode="multiclass",
+                ignore_index=task_args.get("ignore_index", -1),
+                alpha=ta.get("alpha", 0.3),
+                beta=ta.get("beta", 0.7),
+                gamma=ta.get("gamma", 1.0),
+            )
+        task = SemanticSegmentationTask(**task_args)
 
     ckpt_dir = Path(cfg.get("checkpoint_dir", "data/models"))
     ckpt_dir.mkdir(parents=True, exist_ok=True)
@@ -51,7 +69,9 @@ def run_training(config: Path, smoke: bool = False) -> Path:
     try:
         import segmentation_models_pytorch as smp
 
-        torch.serialization.add_safe_globals([smp.losses.TverskyLoss])
+        from subdetect.losses import TargetWeightedMSE
+
+        torch.serialization.add_safe_globals([smp.losses.TverskyLoss, TargetWeightedMSE])
     except Exception:  # noqa: BLE001
         pass
     resume_ckpt = ckpt_dir / "last.ckpt"
@@ -66,8 +86,14 @@ def run_training(config: Path, smoke: bool = False) -> Path:
     # Default to foreground IoU (val/IoU_1), not mIoU: mIoU averages in the background
     # class's IoU, which sits near 1.0 on a mostly-negative val split and swamps the
     # substation-detection signal we actually care about. Overridable via config.
-    monitor = cfg.get("monitor", "val/IoU_1")
-    mode = cfg.get("monitor_mode", "max")
+    # PixelwiseRegressionTask logs no IoU at all (val/RMSE, val/MSE, val/MAE, val/R2_Score,
+    # val/loss), so the regression default is RMSE-minimising.
+    if task_type == "regression":
+        monitor = cfg.get("monitor", "val/RMSE")
+        mode = cfg.get("monitor_mode", "min")
+    else:
+        monitor = cfg.get("monitor", "val/IoU_1")
+        mode = cfg.get("monitor_mode", "max")
     callbacks = [
         ModelCheckpoint(
             dirpath=ckpt_dir, filename="terramind-sub-{epoch:02d}-{step}",

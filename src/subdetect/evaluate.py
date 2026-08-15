@@ -3,6 +3,11 @@
 Reports pixel IoU/F1 and, more importantly for recall-first triage, per-installation
 recall bucketed by substation area and by OSM voltage class: an installation counts as
 detected if any predicted positive pixel overlaps its polygon.
+
+Handles both heads: the checkpoint's task type is sniffed (see infer.sniff_task_type), so
+a fraction-regression checkpoint is scored on the same buckets, thresholding predicted
+coverage instead of class probability. Per-installation recall by area bucket is the
+cross-head comparison that means something; see the note on pixel IoU below.
 """
 
 from __future__ import annotations
@@ -70,7 +75,8 @@ def evaluate(aoi: str, checkpoint: Path, chips_dir: Path, threshold: float = 0.3
     run); the settings floor otherwise silently gates out AREA_BUCKETS below it."""
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     import torch
-    from terratorch.tasks import SemanticSegmentationTask
+
+    from subdetect.infer import is_regression, load_model
 
     settings = Settings.load()
     if min_area_m2 is not None:
@@ -85,17 +91,11 @@ def evaluate(aoi: str, checkpoint: Path, chips_dir: Path, threshold: float = 0.3
         val = index.sample(frac=0.2, random_state=42)
     log.info("Evaluating on %d val chips", len(val))
 
-    try:
-        import segmentation_models_pytorch as smp
-
-        torch.serialization.add_safe_globals([smp.losses.TverskyLoss])
-    except Exception:  # noqa: BLE001
-        pass
-    task = SemanticSegmentationTask.load_from_checkpoint(checkpoint, map_location="cpu").eval()
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    task = task.to(device)
+    task, device = load_model(checkpoint)
+    regression = is_regression(task)
     mods = task.hparams.get("model_args", {}).get("backbone_modalities", ["S2L2A"])
     dual = "S1RTC" in mods
+    log.info("Checkpoint head: %s", "fraction (regression)" if regression else "segmentation")
 
     tp = fp = fn = 0
     det, mis = [], []  # (area, voltage) of GT installations
@@ -113,14 +113,26 @@ def evaluate(aoi: str, checkpoint: Path, chips_dir: Path, threshold: float = 0.3
         with torch.no_grad(), torch.autocast(device_type=device, enabled=device == "cuda"):
             out = task(x)
             logits = out.output if hasattr(out, "output") else out
-            pred = (torch.softmax(logits, 1)[0, 1] >= threshold).cpu().numpy()
+            score = (logits[0] if logits.ndim == 3 else logits[0, 0]) if regression \
+                else torch.softmax(logits, 1)[0, 1]
+            pred = (score >= threshold).cpu().numpy()
 
         with rasterio.open(row["mask"]) as src:
             gt = src.read(1)
-        valid = gt != -1
-        tp += int((pred & (gt == 1) & valid).sum())
-        fp += int((pred & (gt == 0) & valid).sum())
-        fn += int((~pred & (gt == 1) & valid).sum())
+        if gt.dtype.kind == "f":
+            # Fraction mask: a pixel is ground-truth positive when the substation covers
+            # most of it, background when it covers none, and neither when it is a partial
+            # boundary pixel -- scoring those as background would penalise exactly the
+            # sub-pixel resolution the fraction target exists to supply, so they join the
+            # ignore set. Pixel IoU stays comparable to a binary run only in the sense that
+            # both count confidently-labelled pixels; the per-installation recall below is
+            # the metric to compare across heads.
+            pos, valid = gt >= 0.5, (gt >= 0.5) | (gt == 0)
+        else:
+            pos, valid = gt == 1, gt != -1
+        tp += int((pred & pos & valid).sum())
+        fp += int((pred & ~pos & valid).sum())
+        fn += int((~pred & pos & valid).sum())
 
         here = labels[labels.geometry.intersects(chip_geo)]
         for _, inst in here.iterrows():

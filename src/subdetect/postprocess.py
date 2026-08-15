@@ -28,6 +28,32 @@ log = logging.getLogger(__name__)
 EQ_AREA = "EPSG:6933"
 
 
+def raster_footprints(prob_dir: Path) -> gpd.GeoDataFrame:
+    """Footprint of every probability raster in `prob_dir`, in EPSG:4326.
+
+    The inferred area is a set of discrete cells, NOT the rectangle bounding them: cells
+    are selected by the ROI (power corridor + substation buffer), so the covered region is
+    ragged and full of holes. Any evaluation that selects ground truth by bounding box
+    therefore counts substations that were never looked at as misses -- measured on
+    sindh_test, 51 of 163 (31%), some 51 km from the nearest inferred cell. Use
+    `raster_coverage` to build a recall denominator instead.
+    """
+    from shapely.geometry import box
+
+    rows = []
+    for tif in sorted(Path(prob_dir).glob("*.tif")):
+        with rasterio.open(tif) as src:
+            geom = gpd.GeoSeries([box(*src.bounds)], crs=src.crs).to_crs("EPSG:4326").iloc[0]
+        rows.append({"path": str(tif), "geometry": geom})
+    return gpd.GeoDataFrame(rows, crs="EPSG:4326", geometry="geometry")
+
+
+def raster_coverage(prob_dir: Path):
+    """Union of `raster_footprints` -- the region an evaluation may legitimately score."""
+    fp = raster_footprints(prob_dir)
+    return fp.geometry.union_all() if len(fp) else None
+
+
 def polygonize_chips(prob_dir: Path, threshold: float) -> gpd.GeoDataFrame:
     parts = []
     for tif in tqdm(sorted(prob_dir.glob("*.tif")), desc="polygonize"):

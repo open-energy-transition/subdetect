@@ -20,7 +20,7 @@ sys.path.insert(0, "src")
 from subdetect.local_source import load_substation_labels
 from subdetect.config import geodesic_area_m2
 from subdetect.evaluate import _load_s1
-from subdetect.infer import load_model
+from subdetect.infer import is_regression, load_model
 
 logging.disable(logging.INFO)
 THRESHOLD = 0.3
@@ -45,6 +45,10 @@ for arm, ckpt in ARMS.items():
     task, device = load_model(Path(ckpt))
     mods = task.hparams.get("model_args", {}).get("backbone_modalities", ["S2L2A"])
     dual = "S1RTC" in mods
+    # A fraction-head arm outputs predicted sub-pixel coverage, not class probability;
+    # THRESHOLD then means "this share of the pixel is substation" rather than "this
+    # confident", so the two are not directly comparable at a single shared threshold.
+    reg = is_regression(task)
     det = []  # (area, hit)
     for _, row in val.iterrows():
         with rasterio.open(row["image"]) as src:
@@ -57,7 +61,9 @@ for arm, ckpt in ARMS.items():
         with torch.no_grad(), torch.autocast(device_type=device, enabled=device == "cuda"):
             out = task(x)
             logits = out.output if hasattr(out, "output") else out
-            pred = (torch.softmax(logits, 1)[0, 1] >= THRESHOLD).cpu().numpy()
+            score = (logits[0] if logits.ndim == 3 else logits[0, 0]) if reg \
+                else torch.softmax(logits, 1)[0, 1]
+            pred = (score >= THRESHOLD).cpu().numpy()
         here = small[small.geometry.intersects(chip_geo)]
         for _, inst in here.iterrows():
             p = gpd.GeoSeries([inst.geometry], crs="EPSG:4326").to_crs(crs).iloc[0]

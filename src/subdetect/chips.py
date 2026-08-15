@@ -10,6 +10,9 @@ Chip mix (all constrained to the composite coverage):
 
 Mask: 1 = substation polygon >= min area, 0 = background, -1 = ignore (sub-threshold
 polygons, substation nodes as discs, and power=plant perimeters — unmapped switchyards).
+
+With `fraction=True` the mask is instead float32 sub-pixel coverage in [0, 1] (-1 still
+ignore), the target of the regression head — see `_burn_fraction`.
 """
 
 from __future__ import annotations
@@ -140,8 +143,17 @@ def sample_chip_centers(
 
 
 def _burn_mask(labels: gpd.GeoDataFrame, transform, crs, shape, min_area: float,
-               node_radius_m: float) -> np.ndarray:
-    """Rasterize substation labels. pos polys -> 1; small/plant polys + node discs -> -1."""
+               node_radius_m: float, all_touched: bool = True) -> np.ndarray:
+    """Rasterize substation labels. pos polys -> 1; small/plant polys + node discs -> -1.
+
+    `all_touched=True` (the historical default, and what every checkpoint through v14 was
+    trained on) burns any pixel the polygon touches, which inflates a positive by roughly
+    its perimeter in pixels: measured on 502 real installations, 1.70x in the 1,000-2,000 m2
+    bucket against 1.13x at >=20,000 m2. `all_touched=False` burns pixels by centre
+    containment instead, which measures 0.98-1.00x at every size with no installation losing
+    its mask entirely -- see docs/model-lineage.md. Only the POSITIVE burn is switchable:
+    ignore regions stay `all_touched=True`, where a halo is conservative rather than a bias.
+    """
     mask = np.zeros(shape, dtype="int16")
     lab = labels.to_crs(crs)
     ignore = []
@@ -161,16 +173,114 @@ def _burn_mask(labels: gpd.GeoDataFrame, transform, crs, shape, min_area: float,
         mask[ign == 1] = -1
     if big:
         pos = rio_features.rasterize(big, out_shape=shape, transform=transform,
-                                     fill=0, all_touched=True, dtype="uint8")
+                                     fill=0, all_touched=all_touched, dtype="uint8")
         mask[pos == 1] = 1
+    return mask
+
+
+def _burn_fraction(labels: gpd.GeoDataFrame, transform, crs, shape, node_radius_m: float,
+                   factor: int = 10) -> np.ndarray:
+    """Sub-pixel substation coverage fraction per 10 m pixel, in [0, 1], with -1 = ignore.
+
+    Rasterize every substation polygon (`pos` AND sub-floor `small` -- a real substation
+    below the size floor is exactly what this target exists to represent) at `factor`x
+    resolution (~1 m by default), then block-mean back down to the native grid.
+
+    This is the whole point of the fraction target. `_burn_mask` rasterizes with
+    `all_touched=True`, which inflates a polygon by roughly its perimeter in pixels: a
+    1,500 m2 substation (~4 px across) is burned ~2x too large, a 200,000 m2 one only
+    ~1.09x. The binary head is therefore trained on a footprint whose bias varies with
+    size across the exact range where recall collapses. `all_touched=False` at the hi-res
+    grid keeps the area estimate honest -- `all_touched=True` would reintroduce the same
+    halo at 1 m.
+
+    Ignore semantics carry over from `_burn_mask`: substation nodes (discs) and power=plant
+    perimeters are unknown geometry, not background, so they are burned as -1 -- but only
+    where no polygon coverage was measured, so a mapped switchyard inside a plant perimeter
+    keeps its fraction.
+    """
+    lab = labels.to_crs(crs)
+    polys = [
+        (g, 1) for g, role in zip(lab.geometry, labels.role)
+        if not g.is_empty and role in ("pos", "small")
+        and g.geom_type in ("Polygon", "MultiPolygon")
+    ]
+    if polys:
+        hi_shape = (shape[0] * factor, shape[1] * factor)
+        hi_transform = transform * rasterio.Affine.scale(1.0 / factor)
+        hi = rio_features.rasterize(polys, out_shape=hi_shape, transform=hi_transform,
+                                    fill=0, all_touched=False, dtype="uint8")
+        frac = hi.reshape(shape[0], factor, shape[1], factor).mean(axis=(1, 3)).astype("float32")
+    else:
+        frac = np.zeros(shape, dtype="float32")
+
+    ignore = []
+    for g, role in zip(lab.geometry, labels.role):
+        if g.is_empty:
+            continue
+        if role == "node":
+            ignore.append((g.buffer(node_radius_m), 1))
+        elif role == "plant" and g.geom_type in ("Polygon", "MultiPolygon"):
+            ignore.append((g, 1))
+    if ignore:
+        ign = rio_features.rasterize(ignore, out_shape=shape, transform=transform,
+                                     fill=0, all_touched=True, dtype="uint8")
+        frac[(ign == 1) & (frac <= 0)] = -1.0
+    return frac
+
+
+def _transform_bbox_poly(transform, crs, shape):
+    """The chip's footprint in EPSG:4326, from its own geotransform."""
+    from shapely.geometry import box
+
+    minx, maxy = transform * (0, 0)
+    maxx, miny = transform * (shape[1], shape[0])
+    return gpd.GeoSeries([box(minx, miny, maxx, maxy)], crs=crs).to_crs("EPSG:4326").iloc[0]
+
+
+def reburn_mask(src_mask_path: Path, out_path: Path | None, labels: gpd.GeoDataFrame,
+                node_radius_m: float, fraction: bool = True, min_area: float = 0.0,
+                factor: int = 10, all_touched: bool = True) -> np.ndarray:
+    """Re-burn one already-built chip's mask from `labels`, reusing the chip's own
+    geotransform: as a float32 coverage fraction (`fraction=True`) or as a binary class
+    mask with a chosen `all_touched`.
+
+    This is how an existing chip corpus is re-targeted without re-sampling chip centres or
+    re-reading composites, so a run trains on byte-identical imagery with an identical
+    train/val split and the label representation is the only variable against a baseline
+    trained on the same index -- which is the point of both arms in
+    `scripts/build_reburn_chip_index.py`. Passing `fraction=False, all_touched=True`
+    reproduces the mask the chip was originally built with, which is how that script's
+    `--verify` proves the label settings match before re-burning anything.
+
+    `labels` must carry a spatial index (geopandas builds one lazily on first use).
+    Pass `out_path=None` to compute without writing.
+    """
+    with rasterio.open(src_mask_path) as src:
+        transform, crs, shape = src.transform, src.crs, (src.height, src.width)
+    bbox = _transform_bbox_poly(transform, crs, shape)
+    win = labels.iloc[labels.sindex.query(bbox, predicate="intersects")]
+    if fraction:
+        mask = _burn_fraction(win, transform, crs, shape, node_radius_m, factor=factor)
+        dtype = "float32"
+    else:
+        mask = _burn_mask(win, transform, crs, shape, min_area, node_radius_m,
+                          all_touched=all_touched).astype("int16")
+        dtype = "int16"
+    if out_path is not None:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        _write_tif(out_path, mask, transform, crs, dtype)
     return mask
 
 
 def _write_tif(path: Path, arr: np.ndarray, transform, crs, dtype: str) -> None:
     arr = arr if arr.ndim == 3 else arr[None]
+    # predictor 3 is the floating-point predictor; 2 (horizontal) is for integers and
+    # silently costs compression ratio on float32 fraction masks.
+    predictor = 3 if dtype.startswith("float") else 2
     with rasterio.open(
         path, "w", driver="GTiff", width=arr.shape[2], height=arr.shape[1], count=arr.shape[0],
-        dtype=dtype, crs=crs, transform=transform, compress="deflate", predictor=2,
+        dtype=dtype, crs=crs, transform=transform, compress="deflate", predictor=predictor,
     ) as dst:
         dst.write(arr)
 
@@ -205,9 +315,15 @@ def build_chips(
     aoi: str, labels_dir: Path, out_dir: Path, limit: int = 0, with_s1: bool = False,
     with_tower: bool = False,
     min_area_m2: float | None = None, prefer_refined: bool = True, voltage_only: bool = False,
-    voltage_weight: int = 1,
+    voltage_weight: int = 1, fraction: bool = False,
 ) -> Path:
-    """`min_area_m2` overrides the settings label floor for TRAINING masks only
+    """`fraction=True` burns continuous sub-pixel coverage-fraction masks (float32, the
+    regression target -- see `_burn_fraction`) instead of binary class masks, into a
+    parallel `<aoi>_fraction/` tree so the segmentation chips are untouched. To convert an
+    *existing* corpus instead (the matched-baseline path), see
+    `scripts/build_reburn_chip_index.py`.
+
+    `min_area_m2` overrides the settings label floor for TRAINING masks only
     (0 = every substation polygon becomes class 1, none ignored for size). The
     settings floor stays authoritative for candidates/eval elsewhere.
 
@@ -222,7 +338,7 @@ def build_chips(
     if min_area_m2 is not None:
         settings.min_sub_area_m2 = float(min_area_m2)
     _, cfg = resolve_aoi(aoi, settings)
-    out_dir = Path(out_dir) / aoi
+    out_dir = Path(out_dir) / (f"{aoi}_fraction" if fraction else aoi)
     (out_dir / "images").mkdir(parents=True, exist_ok=True)
     (out_dir / "masks").mkdir(parents=True, exist_ok=True)
     if with_s1:
@@ -271,10 +387,15 @@ def build_chips(
                 arr, ox, oy = _crop(arr, CHIP_SIZE)
                 transform = transform * rasterio.Affine.translation(ox, oy)
                 win_labels = labels[labels.geometry.intersects(_bbox_poly(row.lon, row.lat))]
-                mask = _burn_mask(win_labels, transform, crs, arr.shape[-2:],
-                                  settings.min_sub_area_m2, settings.node_ignore_radius_m)
                 _write_tif(img_path, arr, transform, crs, "uint16")
-                _write_tif(mask_path, mask.astype("int16"), transform, crs, "int16")
+                if fraction:
+                    mask = _burn_fraction(win_labels, transform, crs, arr.shape[-2:],
+                                          settings.node_ignore_radius_m)
+                    _write_tif(mask_path, mask, transform, crs, "float32")
+                else:
+                    mask = _burn_mask(win_labels, transform, crs, arr.shape[-2:],
+                                      settings.min_sub_area_m2, settings.node_ignore_radius_m)
+                    _write_tif(mask_path, mask.astype("int16"), transform, crs, "int16")
             if with_s1 and s1_path is not None and not s1_path.exists():
                 try:
                     s1res = comp_idx.read_window(_chip_bbox(row.lon, row.lat), "composite_s1.tif")
@@ -304,11 +425,18 @@ def build_chips(
             return None
         with rasterio.open(mask_path) as m:
             band = m.read(1)
-        return dict(chip_id=cid, lon=row.lon, lat=row.lat, kind=row.kind, tile=tile,
-                    split=_split_of(row.lon, row.lat, cfg), sub_pixels=int((band == 1).sum()),
-                    image=str(img_path), s1=str(s1_path) if s1_path else None,
-                    tower=str(tower_path) if tower_path else None,
-                    mask=str(mask_path))
+        rec = dict(chip_id=cid, lon=row.lon, lat=row.lat, kind=row.kind, tile=tile,
+                   split=_split_of(row.lon, row.lat, cfg),
+                   sub_pixels=int((band > 0).sum() if fraction else (band == 1).sum()),
+                   image=str(img_path), s1=str(s1_path) if s1_path else None,
+                   tower=str(tower_path) if tower_path else None,
+                   mask=str(mask_path))
+        if fraction:
+            # Σ coverage over the chip: chip-level substation area in units of 100 m2.
+            # `sub_pixels` counts any partially covered pixel, so the two together separate
+            # "one big yard" from "a scatter of boundary pixels".
+            rec["sub_frac_sum"] = float(band[band > 0].sum())
+        return rec
 
     records = [r for r in (_build_one(row) for _, row in tqdm(
         list(centers.iterrows()), desc="chips")) if r]

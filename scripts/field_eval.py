@@ -30,15 +30,33 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from subdetect.config import Settings, geodesic_area_m2  # noqa: E402
 from subdetect.evaluate import AREA_BUCKETS, auc, precision_at  # noqa: E402
-from subdetect.postprocess import polygonize_chips_v2  # noqa: E402
+from subdetect.postprocess import polygonize_chips_v2, raster_coverage  # noqa: E402
 from eval_polygonize_v2 import _ground_truth  # noqa: E402
 
 EQ = "EPSG:6933"
 RESULTS_CSV = ROOT / "data" / "eval_results" / "field_eval.csv"
+# Bumped 2026-08-15 with two fixes that both change every number in the CSV: the recall
+# denominator is now the inferred footprint rather than the candidate bounding box, and the
+# candidate area filter is decoupled from the label floor (see field_eval's docstring).
+# Rows carry this so v1 and v2 results coexist instead of being silently mixed -- only
+# compare rows of equal eval_version.
+EVAL_VERSION = 2
+# Smallest component kept as a candidate. 1,000 m2 = the lower edge of the smallest
+# evaluated bucket, so the filter no longer excludes a size class by construction.
+MIN_CAND_AREA_M2 = 1000.0
 
 
-def _label_polys(labels_aoi: str, bounds) -> gpd.GeoDataFrame:
-    """Raw (un-refined) substation polygons + node discs, every size, for recall buckets."""
+def _label_polys(labels_aoi: str, bounds, covered=None) -> gpd.GeoDataFrame:
+    """Raw (un-refined) substation polygons + node discs, every size, for recall buckets.
+
+    `covered` (the union of the run's probability-raster footprints) restricts the recall
+    DENOMINATOR to substations that were actually inferred. Without it the denominator is a
+    bounding box, and the inferred area is a ragged set of ROI-selected cells rather than a
+    rectangle -- so substations that no raster ever covered are scored as misses. Measured
+    on sindh_test: 51 of 163 (31%), including the region's two largest substations, one of
+    them 51 km outside the nearest inferred cell. Membership is by centroid, so a substation
+    is counted exactly once and only where it could have been seen.
+    """
     b = bounds
     polys = gpd.read_parquet(ROOT / "data" / "labels" / labels_aoi / "substations_poly.parquet")
     polys = polys.cx[b[0]:b[2], b[1]:b[3]].copy()
@@ -53,23 +71,44 @@ def _label_polys(labels_aoi: str, bounds) -> gpd.GeoDataFrame:
             nodes["geometry"] = nodes.to_crs(EQ).buffer(100.0).to_crs("EPSG:4326")
             nodes["area_m2"] = 0.0  # nodes carry no area; bucketed separately below
             polys = pd.concat([polys, nodes], ignore_index=True)
-    return gpd.GeoDataFrame(polys, crs="EPSG:4326")
+    out = gpd.GeoDataFrame(polys, crs="EPSG:4326")
+    if covered is not None:
+        # Centroid in an equal-area CRS, not in lat/lon: a 200 m substation's 4326 centroid
+        # is close enough, but the containment test is cheap to do correctly.
+        cov_eq = gpd.GeoSeries([covered], crs="EPSG:4326").to_crs(EQ).iloc[0]
+        out = out[out.to_crs(EQ).geometry.centroid.within(cov_eq).values].reset_index(drop=True)
+    return out
 
 
-def field_eval(run_name: str, prob_dir: Path, labels_aoi: str, lo=0.2, hi=0.4) -> dict:
-    settings = Settings.load()
+def field_eval(run_name: str, prob_dir: Path, labels_aoi: str, lo=0.2, hi=0.4,
+               min_cand_area_m2: float = MIN_CAND_AREA_M2) -> dict:
+    """`min_cand_area_m2` is the smallest component kept as a candidate. It used to be
+    `settings.min_sub_area_m2`, which is the LABEL floor (20,000 m2 in configs/aoi.yaml) --
+    two different jobs sharing one constant. At 20,000 m2 a candidate had to be as large as
+    the biggest ground-truth bucket to count at all, so a substation smaller than that could
+    only ever be detected via an over-predicted footprint. Measured on sindh_test v12mean,
+    that filter discarded 20 correctly-detected substations whose components carried a
+    median peak probability of 0.53. The two constants are now independent.
+    """
+    settings = Settings.load()  # noqa: F841 -- kept for callers that patch label settings
     v2 = polygonize_chips_v2(prob_dir, lo=lo, hi=hi)
     v2["area_m2"] = [geodesic_area_m2(g) for g in v2.geometry]
-    v2f = v2[v2.area_m2 >= settings.min_sub_area_m2].reset_index(drop=True)
+    v2f = v2[v2.area_m2 >= min_cand_area_m2].reset_index(drop=True)
 
+    covered = raster_coverage(prob_dir)
     region = prob_dir.parent.name if prob_dir.name == "prob" else prob_dir.name
-    row = {"run_name": run_name, "region": region, "n_candidates": len(v2f)}
+    row = {"run_name": run_name, "region": region, "eval_version": EVAL_VERSION,
+           "min_cand_area_m2": min_cand_area_m2, "n_candidates": len(v2f)}
     if v2f.empty:
         row.update(auc=float("nan"), p_at_20=float("nan"), p_at_50=float("nan"),
                     n_hits=0, n_fp_proxy=0)
         return row
 
-    bounds = gpd.GeoSeries(v2f.geometry, crs="EPSG:4326").total_bounds
+    # Bound the ground truth by the inferred footprint, not by where candidates happened to
+    # land -- the latter varies run to run, which silently made recall denominators differ
+    # between rows of this very CSV (n_20000-inf has been both 19 and 21 for the same region).
+    bounds = (gpd.GeoSeries([covered], crs="EPSG:4326").total_bounds if covered is not None
+              else gpd.GeoSeries(v2f.geometry, crs="EPSG:4326").total_bounds)
     gt_union, gt_desc = _ground_truth(labels_aoi, bounds)
     v2f["hit"] = (v2f.to_crs(EQ).intersects(gt_union).values
                   if gt_union is not None else False)
@@ -85,7 +124,8 @@ def field_eval(run_name: str, prob_dir: Path, labels_aoi: str, lo=0.2, hi=0.4) -
     )
 
     # installation-level recall bucketed by area: does ANY candidate hit this real sub?
-    labels = _label_polys(labels_aoi, bounds)
+    labels = _label_polys(labels_aoi, bounds, covered=covered)
+    row["n_gt_uncovered"] = len(_label_polys(labels_aoi, bounds)) - len(labels)
     v2_eq = v2f.to_crs(EQ)
     for lo_a, hi_a in AREA_BUCKETS:
         sel = labels[(labels.area_m2 >= lo_a) & (labels.area_m2 < hi_a)]
@@ -103,15 +143,25 @@ def main() -> None:
     ap.add_argument("--run-name", required=True)
     ap.add_argument("--prob-dir", required=True)
     ap.add_argument("--labels", default=None, help="AOI under data/labels/ (default: Overpass)")
+    ap.add_argument("--min-cand-area-m2", type=float, default=MIN_CAND_AREA_M2,
+                    help="Smallest component kept as a candidate (decoupled from the label "
+                         "floor as of eval_version 2)")
     a = ap.parse_args()
 
-    row = field_eval(a.run_name, ROOT / a.prob_dir, a.labels)
+    row = field_eval(a.run_name, ROOT / a.prob_dir, a.labels,
+                     min_cand_area_m2=a.min_cand_area_m2)
     print(pd.Series(row).to_string())
 
     RESULTS_CSV.parent.mkdir(parents=True, exist_ok=True)
     prior = pd.read_csv(RESULTS_CSV) if RESULTS_CSV.exists() else pd.DataFrame()
-    prior = prior[~((prior.get("run_name") == a.run_name)
-                     & (prior.get("region") == row["region"]))] if len(prior) else prior
+    # Key on eval_version too, so the v1 history stays intact alongside the v2 re-baseline
+    # instead of being overwritten by it. Rows predating the bump have no column -> v1.
+    if len(prior):
+        if "eval_version" not in prior.columns:
+            prior["eval_version"] = 1
+        prior = prior[~((prior.get("run_name") == a.run_name)
+                        & (prior.get("region") == row["region"])
+                        & (prior.get("eval_version") == row["eval_version"]))]
     updated = pd.concat([prior, pd.DataFrame([row])], ignore_index=True)
     updated.to_csv(RESULTS_CSV, index=False)
     print(f"\nwrote {RESULTS_CSV} ({len(updated)} rows)")

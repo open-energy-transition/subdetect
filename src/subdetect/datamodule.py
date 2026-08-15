@@ -54,9 +54,13 @@ def _load_tower(path: str) -> np.ndarray:
 
 class SubChipDataset(Dataset):
     def __init__(self, index: pd.DataFrame, modalities: list[str], augment: bool = False,
-                 upsample: int = 1):
+                 upsample: int = 1, n_revisits: int = 1, target: str = "class"):
         self.index = index.reset_index(drop=True)
         self.modalities = modalities
+        # target="fraction": masks are float32 sub-pixel coverage in [0, 1] (-1 = ignore)
+        # for PixelwiseRegressionTask, instead of int64 class ids for the segmentation
+        # task. See chips.py::_burn_fraction and configs/terramind_sub_v15_fraction.yaml.
+        self.target = target
         self.has_s1 = "S1RTC" in modalities
         self.has_tower = "power_tower_prior" in modalities
         self.dual = self.has_s1 or self.has_tower
@@ -66,6 +70,15 @@ class SubChipDataset(Dataset):
         # token-granularity limit (one 16 px patch = 160 m at native 10 m, bigger
         # than most small substations). See the v12 config header.
         self.upsample = upsample
+        # n_revisits > 1: "image" points at an (n_revisits*10, H, W) stack of
+        # individual per-date S2 composites (band-order [date0's 10 bands, date1's
+        # 10 bands, ...], see scripts/build_multidate_chips.py) instead of one
+        # median-collapsed image -- fed to a TemporalWrapper-wrapped backbone
+        # (see train.py) as a (10, T, H, W) tensor per sample, batched to the
+        # (B, C, T, H, W) shape terratorch's TemporalWrapper expects. S1/tower are
+        # NOT multi-date (kept as single median composites) -- this is an S2-only
+        # ablation, see configs/terramind_sub_v14_multitemporal*.yaml.
+        self.n_revisits = n_revisits
 
     def __len__(self) -> int:
         return len(self.index)
@@ -73,9 +86,9 @@ class SubChipDataset(Dataset):
     def __getitem__(self, i: int) -> dict:
         row = self.index.iloc[i]
         with rasterio.open(row["image"]) as src:
-            s2 = src.read().astype("float32") / DN_SCALE  # (10, H, W)
+            s2 = src.read().astype("float32") / DN_SCALE  # (n_revisits*10, H, W) or (10, H, W)
         with rasterio.open(row["mask"]) as src:
-            mask = src.read(1).astype("int64")
+            mask = src.read(1).astype("float32" if self.target == "fraction" else "int64")
         s1 = _load_s1(row["s1"]) if self.has_s1 else None
         tower = _load_tower(row["tower"]) if self.has_tower else None
 
@@ -99,6 +112,14 @@ class SubChipDataset(Dataset):
         s2_t, mask_t = torch.from_numpy(s2), torch.from_numpy(mask)
         s1_t = torch.from_numpy(s1) if s1 is not None else None
         tower_t = torch.from_numpy(tower) if tower is not None else None
+        if self.n_revisits > 1:
+            # rot90/flip above ran on the full (n_revisits*10, H, W) channel axis --
+            # spatially identical across revisits, so a single augmentation draw
+            # applies consistently to all of them for free. Reshape only now.
+            t, h, w = self.n_revisits, s2_t.shape[-2], s2_t.shape[-1]
+            s2_t = s2_t.view(t, 10, h, w).permute(1, 0, 2, 3).contiguous()  # (10, T, H, W)
+        if self.upsample > 1 and self.n_revisits > 1:
+            raise NotImplementedError("upsample + n_revisits not combined in this ablation")
         if self.upsample > 1:
             f = float(self.upsample)
             s2_t = torch.nn.functional.interpolate(
@@ -109,8 +130,14 @@ class SubChipDataset(Dataset):
             if tower_t is not None:
                 tower_t = torch.nn.functional.interpolate(
                     tower_t[None], scale_factor=f, mode="bilinear", align_corners=False)[0]
+            # Nearest for both targets: it preserves the -1 ignore sentinel exactly (any
+            # smoothing would smear it into valid pixels), and coverage fraction is an
+            # intensive quantity, so replicating a 10 m pixel's fraction across the four
+            # 5 m pixels it becomes is the correct nearest-neighbour answer.
             mask_t = torch.nn.functional.interpolate(
-                mask_t[None, None].float(), scale_factor=f, mode="nearest")[0, 0].long()
+                mask_t[None, None].float(), scale_factor=f, mode="nearest")[0, 0]
+            if self.target != "fraction":
+                mask_t = mask_t.long()
         if self.dual:
             img = {}
             if "S2L2A" in self.modalities:
@@ -132,6 +159,8 @@ class SubDataModule(LightningDataModule):
         modalities: list[str] | None = None,
         min_val_chips: int = 8,
         upsample: int = 1,
+        n_revisits: int = 1,
+        target: str = "class",
     ):
         super().__init__()
         self.index_path = Path(index_path)
@@ -140,6 +169,8 @@ class SubDataModule(LightningDataModule):
         self.modalities = modalities or ["S2L2A"]
         self.min_val_chips = min_val_chips
         self.upsample = upsample
+        self.n_revisits = n_revisits
+        self.target = target
 
     def setup(self, stage: str | None = None) -> None:
         index = pd.read_parquet(self.index_path)
@@ -149,8 +180,10 @@ class SubDataModule(LightningDataModule):
             val = train.sample(frac=0.2, random_state=42)
             train = train.drop(val.index)
         self.train_ds = SubChipDataset(train, self.modalities, augment=True,
-                                       upsample=self.upsample)
-        self.val_ds = SubChipDataset(val, self.modalities, upsample=self.upsample)
+                                       upsample=self.upsample, n_revisits=self.n_revisits,
+                                       target=self.target)
+        self.val_ds = SubChipDataset(val, self.modalities, upsample=self.upsample,
+                                     n_revisits=self.n_revisits, target=self.target)
 
     def train_dataloader(self) -> DataLoader:
         return DataLoader(self.train_ds, batch_size=self.batch_size, shuffle=True,

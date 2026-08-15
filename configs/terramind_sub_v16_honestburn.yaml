@@ -1,0 +1,95 @@
+# v16 honestburn: v11b_s2only with ONE token changed in the label rasterizer.
+#
+# `chips.py::_burn_mask` has always burned positives with `all_touched=True`, which marks
+# every pixel the polygon touches and so inflates a substation by roughly its perimeter in
+# pixels. Measured on 502 real installations lying entirely inside a training chip (burned
+# pixel area against true geodesic area):
+#
+#   bucket            all_touched=True   centre-in (this arm)
+#   1,000-2,000 m2         1.70x                0.98x
+#   2,000-5,000 m2         1.47x                1.00x
+#   5,000-20,000 m2        1.29x                1.00x
+#   >=20,000 m2            1.13x                1.00x
+#
+# So every checkpoint through v14 learned a footprint whose bias varies monotonically with
+# size, and is worst in the 1,000-2,000 m2 bucket -- the one that has read 0% recall in
+# every model tested and has been attributed to a resolution floor (docs/model-lineage.md).
+# This arm asks whether some of that "floor" is supervision noise rather than optics.
+#
+# Why this is the arm to run first. It changes the labels and NOTHING else: still a
+# two-class mask, still Tversky beta>alpha recall-first, still a softmax probability
+# raster out. Every downstream tuning constant keeps its meaning -- the 0.3 threshold, the
+# hysteresis seeds (0.4 / 0.2), the `P_S1 x (0.5 + 0.5 x P_S2)` fusion. So a win here ships
+# with no integration work, and it is also the clean control for v15_fraction: v15 removes
+# this same bias AND adds sub-pixel targets, so v15-vs-v16 is what isolates the regression
+# head's own contribution. v15-vs-v11b would confound the two.
+#
+# Everything below is byte-identical to configs/terramind_sub_v11b_s2only.yaml except
+# index_path and checkpoint_dir. The index is v11b's own, with only the 3,684 OSM-labelled
+# chips' mask paths repointed (scripts/build_reburn_chip_index.py --target binary);
+# TorchGeo and hard-negative chips still point at their original masks, since their source
+# polygons are not on disk and cannot be re-burned. Chip centres, imagery and the train/val
+# split are untouched.
+#
+# Expect a SMALL aggregate change, and do not read that as the effect size. Removing the
+# inflation drops positive pixels 754,542 -> 669,847 (-11.2%) across the re-burned chips,
+# and only -1.0% corpus-wide. That is because the pixel total is dominated by large
+# substations, which were only ~1.13x inflated; the 1.70x correction lands on the smallest
+# installations, which contribute a negligible share of pixels. The loss is likewise
+# dominated by large substations, so this arm nudges the gradient by ~11% overall while
+# fixing the labels of exactly the class that has never been detected. That is the bet, and
+# it is a narrower one than the 1.70x headline suggests.
+#
+# Four of 3,684 re-burned chips lose their positive pixels entirely (sliver polygons whose
+# centres miss every pixel) and become negative-only chips. That is a second, tiny label
+# change beyond the bias fix -- noted for completeness, not expected to matter at 0.1%.
+#
+# How to judge. NOT val/IoU_1 -- positive pixel counts change, so IoU is not comparable to
+# v11b even though the split is identical (it is only the checkpoint-selection monitor).
+# Judge on scripts/eval_small_subs.py size buckets and scripts/field_eval.py on sindh_test.
+# Given the v8 episode (P@50 0.45 -> 0.05 on an identical reseed), a positive result needs
+# a reseed control before it is believed.
+data:
+  index_path: data/chips_v16_honestburn/combined/index.parquet
+  batch_size: 8
+  num_workers: 4
+  modalities: [S2L2A]
+
+task:
+  model_factory: EncoderDecoderFactory
+  model_args:
+    backbone: terramind_v1_tiny
+    backbone_pretrained: true
+    backbone_modalities: [S2L2A]
+    backbone_bands:
+      S2L2A: [BLUE, GREEN, RED, RED_EDGE_1, RED_EDGE_2, RED_EDGE_3,
+              NIR_BROAD, NIR_NARROW, SWIR_1, SWIR_2]
+    necks:
+      - name: SelectIndices
+        indices: [2, 5, 8, 11]
+      - name: ReshapeTokensToImage
+        remove_cls_token: false
+      - name: LearnedInterpolateToPyramidal
+    decoder: UNetDecoder
+    decoder_channels: [256, 128, 64, 32]
+    num_classes: 2
+    rescale: true
+  loss: tversky
+  tversky_args: {alpha: 0.35, beta: 0.65, gamma: 1.33}
+  class_weights: [0.25, 0.75]
+  ignore_index: -1
+  lr: 1.0e-4
+  optimizer: AdamW
+  optimizer_hparams:
+    weight_decay: 0.05
+  freeze_backbone: false
+  plot_on_val: false
+
+trainer:
+  max_epochs: 60
+  accumulate_grad_batches: 2
+
+checkpoint_dir: data/models/stageA_v16_honestburn
+patience: 15
+monitor: val/IoU_1
+monitor_mode: max

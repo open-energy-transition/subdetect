@@ -1,0 +1,88 @@
+# v14: multi-temporal S2 max-fusion, replacing the single median composite with 4
+# individual per-date revisits fed through terratorch's TemporalWrapper (pooling=max)
+# -- a genuine latent-space fusion, matching the mechanism satlaspretrain_models'
+# AggregationBackbone uses (see scripts/swin_lindsay.py's investigation) and the
+# TransitionZero paper's finding that latent max-fusion across revisits beats median
+# compositing (arXiv:2409.17363, see memory subdetect-improvement-levers).
+#
+# Motivation: v5-no-floor-training and v12_up2 (2x upsampling) both targeted the
+# small-substation recall floor and both left it unmoved below ~2000 m2 -- median
+# compositing was suspected of destroying real per-date signal (median compositing
+# already known to suppress persistent-but-faint scatterers for S1 tower signatures,
+# see subdetect-tower-s1-priors). Confirmed cheaply BEFORE this run via
+# scripts/proxy_multidate_maxfusion.py (raster-level ensemble, no retrain, existing
+# v9_s2only checkpoint): peak probability inside real Pakistan substation polygons,
+# median-composite baseline vs max-fusing 4 independently-run individual dates --
+# 2000-5000 m2: 0.00075->0.097 (~130x), 5000-20000 m2: 0.195->0.381 (~2x), >=20000 m2:
+# 0.364->0.545 (~1.5x), 65-71% of individual substations improved in the 2k-20k range.
+# <2000 m2 unchanged (~1e-6, both null) -- that floor looks like a genuine resolution
+# limit, not a compositing artifact. This config tests whether a model TRAINED with
+# access to the per-date stack (not just a post-hoc max over independent inference
+# passes) can exploit that recoverable signal even better.
+#
+# SCOPE CAVEAT: proof-of-concept, not a full production re-chip. Full country-scale
+# multi-date recomposing (every cell, every chip) would multiply storage ~4x and
+# STAC fetch volume noticeably; this run instead uses a stratified ~600-chip subset
+# of the existing chips_v5/combined index (scripts/build_multidate_chips.py), biased
+# toward small substations (the target failure mode) with negatives for balance, on
+# the EXACT SAME pixel grid as the original chips (odc GeoBox from the original
+# image's own transform, so the unchanged mask files stay perfectly co-registered).
+# Compare against a matched single-image baseline trained on the IDENTICAL chip
+# subset (configs/terramind_sub_v14_baseline_matched.yaml), not the full-scale
+# v5/v9 numbers -- dataset size differs 8-50x, so those aren't a clean ablation.
+data:
+  index_path: data/chips_multidate/pakistan_india/index.parquet
+  batch_size: 4
+  num_workers: 4
+  modalities: [S2L2A]
+  n_revisits: 4
+
+task:
+  model_factory: EncoderDecoderFactory
+  model_args:
+    backbone: terramind_v1_tiny
+    backbone_pretrained: true
+    backbone_modalities: [S2L2A]
+    backbone_bands:
+      S2L2A: [BLUE, GREEN, RED, RED_EDGE_1, RED_EDGE_2, RED_EDGE_3,
+              NIR_BROAD, NIR_NARROW, SWIR_1, SWIR_2]
+    backbone_use_temporal: true
+    backbone_temporal_pooling: max
+    necks:
+      - name: SelectIndices
+        indices: [2, 5, 8, 11]
+      - name: ReshapeTokensToImage
+        remove_cls_token: false
+      - name: LearnedInterpolateToPyramidal
+    decoder: UNetDecoder
+    decoder_channels: [256, 128, 64, 32]
+    num_classes: 2
+    rescale: true
+  loss: tversky
+  tversky_args: {alpha: 0.35, beta: 0.65, gamma: 1.33}
+  class_weights: [0.25, 0.75]
+  ignore_index: -1
+  lr: 2.0e-4
+  optimizer: AdamW
+  optimizer_hparams:
+    weight_decay: 0.05
+  freeze_backbone: false
+  plot_on_val: false
+
+trainer:
+  max_epochs: 120
+  accumulate_grad_batches: 4
+
+checkpoint_dir: data/models/stageA_v14_multitemporal
+patience: 40
+monitor_mode: max
+# 2026-07-31 retune: the first 1332-chip/60-epoch run hit max_epochs while val/IoU_1
+# was still climbing (best=epoch 59, the last one -- never plateaued into early
+# stopping) yet the resulting checkpoint showed near-zero, flat detection on the
+# 170-installation eval even for >=20000 m2 substations the matched single-image
+# baseline caught fine (0.0014 vs 0.278). Doubled max_epochs/patience for more room
+# to converge; nudged lr up (1e-4->2e-4) since max-pooling over revisits means each
+# individual revisit's pathway gets gradient less often per step than a single-image
+# model at the same step count -- a plausible reason for the previous run's under-
+# convergence at 60 epochs. Same changes applied to
+# terramind_sub_v14_baseline_matched.yaml for a fair matched comparison.

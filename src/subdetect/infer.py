@@ -34,22 +34,64 @@ _S1_MEAN = np.array(S1_MEAN, dtype="float32")[:, None, None]
 _S1_STD = np.array(S1_STD, dtype="float32")[:, None, None]
 
 
-def load_model(checkpoint: Path):
+def _allow_pickled_losses() -> None:
+    """Recall-tuned checkpoints pickle a TverskyLoss criterion and fraction checkpoints a
+    TargetWeightedMSE; PyTorch 2.6 defaults weights_only=True, which rejects both."""
     import torch
-    from terratorch.tasks import SemanticSegmentationTask
 
-    # Recall-tuned checkpoints pickle a TverskyLoss criterion; PyTorch 2.6 defaults
-    # weights_only=True, which rejects it. Allowlist our own class.
+    globals_ = []
     try:
         import segmentation_models_pytorch as smp
 
-        torch.serialization.add_safe_globals([smp.losses.TverskyLoss])
+        globals_.append(smp.losses.TverskyLoss)
     except Exception:  # noqa: BLE001
         pass
-    task = SemanticSegmentationTask.load_from_checkpoint(checkpoint, map_location="cpu")
+    try:
+        from subdetect.losses import TargetWeightedMSE
+
+        globals_.append(TargetWeightedMSE)
+    except Exception:  # noqa: BLE001
+        pass
+    if globals_:
+        torch.serialization.add_safe_globals(globals_)
+
+
+def sniff_task_type(checkpoint: Path) -> str:
+    """Segmentation configs carry model_args.num_classes; regression configs don't
+    (RegressionHead defaults to 1 output channel). Used by both infer and evaluate."""
+    import torch
+
+    _allow_pickled_losses()
+    ckpt = torch.load(checkpoint, map_location="cpu", weights_only=True)
+    model_args = ckpt.get("hyper_parameters", {}).get("model_args", {})
+    return "regression" if "num_classes" not in model_args else "segmentation"
+
+
+def load_model(checkpoint: Path, task_type: str = "auto"):
+    """Returns (task, device). The task class is chosen from the checkpoint itself, so
+    callers that only ever saw segmentation checkpoints keep working unchanged and pick up
+    fraction-head checkpoints for free -- `predict_window` re-detects the type from the
+    task object rather than needing it threaded through."""
+    import torch
+
+    _allow_pickled_losses()
+    if task_type == "auto":
+        task_type = sniff_task_type(checkpoint)
+    if task_type == "regression":
+        from terratorch.tasks import PixelwiseRegressionTask
+
+        task = PixelwiseRegressionTask.load_from_checkpoint(checkpoint, map_location="cpu")
+    else:
+        from terratorch.tasks import SemanticSegmentationTask
+
+        task = SemanticSegmentationTask.load_from_checkpoint(checkpoint, map_location="cpu")
     task.eval()
     device = "cuda" if torch.cuda.is_available() else "cpu"
     return task.to(device), device
+
+
+def is_regression(task) -> bool:
+    return type(task).__name__ == "PixelwiseRegressionTask"
 
 
 def _is_dual(task) -> bool:
@@ -77,6 +119,13 @@ def predict_window(task, mods: list[str], device: str, s2_np: np.ndarray,
     downsample the resulting probability map back to the window's native size (`rescale`
     in model_args makes output spatial size == input spatial size) so callers can
     Hann-blend it into a native-resolution mosaic exactly as with upsample=1.
+
+    For a fraction-head (regression) checkpoint the returned map is predicted sub-pixel
+    coverage in [0, 1] rather than class probability. Both are [0, 1] rasters that
+    threshold, Hann-blend and polygonize identically, so every downstream caller is
+    unchanged -- but they are NOT the same quantity, and a threshold tuned on one does not
+    transfer to the other (a fully-covered substation interior reads ~1.0 either way, but
+    a boundary pixel reads its true coverage instead of a confidence).
     """
     import torch
 
@@ -93,7 +142,13 @@ def predict_window(task, mods: list[str], device: str, s2_np: np.ndarray,
     with torch.no_grad(), torch.autocast(device_type=device, enabled=device == "cuda"):
         out = task(x)
         logits = out.output if hasattr(out, "output") else out
-        prob = torch.softmax(logits, dim=1)[:, 1:2]
+        if is_regression(task):
+            # Sigmoid already applied by the head (head_final_act); PixelWiseModel squeezes
+            # the single channel, so output is (B, H, W) -- restore the channel axis the
+            # interpolate/return path below expects.
+            prob = (logits[:, None] if logits.ndim == 3 else logits[:, :1]).clamp(0, 1)
+        else:
+            prob = torch.softmax(logits, dim=1)[:, 1:2]
     if upsample > 1:
         prob = torch.nn.functional.interpolate(prob, size=s2_np.shape[-2:], mode="bilinear",
                                                align_corners=False)
@@ -118,8 +173,9 @@ def run_inference(
     task, device = load_model(checkpoint)
     dual = _is_dual(task)
     mods = ["S2L2A", "S1RTC"] if dual else ["S2L2A"]
-    log.info("Inference on %s: %d cells, modalities=%s, upsample=%dx", aoi, len(comp_idx.index),
-             "S2+S1" if dual else "S2", upsample)
+    log.info("Inference on %s: %d cells, modalities=%s, upsample=%dx, head=%s", aoi,
+             len(comp_idx.index), "S2+S1" if dual else "S2", upsample,
+             "fraction" if is_regression(task) else "segmentation")
 
     if dual:
         missing = [p for p in comp_idx.index.path
