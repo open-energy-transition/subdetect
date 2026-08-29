@@ -176,14 +176,29 @@ def pbf_timestamp(pbf: Path) -> dt.datetime | None:
         return None
 
 
-def fetch_pbf(refresh: bool, max_age_days: int, allow_stale: bool) -> tuple[Path, dt.datetime | None, int]:
+def fetch_pbf(refresh: bool, max_age_days: int, allow_stale: bool,
+              explicit: Path | None = None) -> tuple[Path, dt.datetime | None, int]:
     """Return (pbf, snapshot_ts, age_days), downloading to a DATED filename if asked.
 
     Never touches `pakistan-latest.osm.pbf`: that file is the substation lineage's input,
     and `osm._download` returns early whenever it exists, so it can never self-refresh.
     """
+    if explicit is not None:
+        pbf = Path(explicit)
+        if not pbf.exists():
+            raise SystemExit(f"--pbf {pbf} does not exist")
+        ts = pbf_timestamp(pbf)
+        age = (dt.datetime.now(dt.timezone.utc) - ts).days if ts else 10_000
+        log.info("PBF %s (explicit)  snapshot=%s  age=%d d", pbf.name, ts, age)
+        if age > max_age_days and not allow_stale:
+            raise SystemExit(f"{pbf.name} is {age} d old; pass --allow-stale to proceed")
+        return pbf, ts, age
     dated = OSM_DIR / f"pakistan-{dt.date.today():%Y%m%d}.osm.pbf"
-    if refresh and not dated.exists():
+    if refresh:
+        # Always re-enter wget when refreshing, even if the file exists: a run killed
+        # mid-download leaves a truncated but non-empty file, and skipping on mere
+        # existence would hand a half-PBF to osmium. `wget -c` resumes, and is a cheap
+        # no-op once the file is complete.
         _run(["wget", "-c", "-q", "--show-progress", GEOFABRIK_PK, "-O", str(dated)])
     pbf = dated if dated.exists() else OSM_DIR / "pakistan-latest.osm.pbf"
     if not pbf.exists():
@@ -248,6 +263,20 @@ def extract(pbf: Path, bbox: tuple[float, float, float, float], force: bool) -> 
             rows.append(props)
     gdf = gpd.GeoDataFrame(rows, crs="EPSG:4326")
     log.info("exported %d features from %s", len(gdf), seq.name)
+
+    # `osmium export` with BOTH linear_tags and area_tags emits a closed way TWICE -- once
+    # as a LineString and once as a (Multi)Polygon. Measured here: 252 of 256 power=plant
+    # objects arrive duplicated. Left in place, every closed-way plant would be counted
+    # twice and contribute both a line buffer and a polygon buffer to its site. Keep the
+    # richest geometry per OSM object: polygon > line > point.
+    _rank = {"MultiPolygon": 0, "Polygon": 0, "LineString": 1, "MultiLineString": 1, "Point": 2}
+    n0 = len(gdf)
+    gdf = (gdf.assign(_r=gdf.geometry.geom_type.map(lambda t: _rank.get(t, 3)))
+              .sort_values("_r")
+              .drop_duplicates(subset=["osm_type", "osm_id"], keep="first")
+              .drop(columns=["_r"])
+              .reset_index(drop=True))
+    log.info("deduped %d -> %d features (one geometry per OSM object)", n0, len(gdf))
 
     missing = REQUIRED_COLS - set(gdf.columns)
     if missing:
@@ -375,7 +404,11 @@ def assemble_sites(
     c = anchors.geometry.union_all().centroid
     utm = _utm_for(c.x, c.y)
     anchors = anchors.to_crs(utm)
-    anchors["geometry"] = anchors.geometry.buffer(0)
+    # buffer(0) heals invalid polygons, but on a Point it returns an EMPTY polygon -- and
+    # 59 of the anchors here are generator nodes. Applying it blindly silently deleted
+    # every node-only site. Heal polygons only.
+    _poly = anchors.geometry.geom_type.isin(["Polygon", "MultiPolygon"])
+    anchors.loc[_poly, "geometry"] = anchors.loc[_poly, "geometry"].buffer(0)
     conduits = conduits.to_crs(utm) if len(conduits) else conduits
     headraces = headraces.to_crs(utm) if len(headraces) else headraces
 
@@ -461,7 +494,12 @@ def assemble_sites(
         anchor_geoms_4326 = gpd.GeoSeries(
             [m["geom"] for m in ms if m["cls"] in ("plant", "generator")], crs=utm
         ).to_crs("EPSG:4326")
-        rep = unary_union(list(anchor_geoms_4326)).representative_point()
+        anchor_union = unary_union([g for g in anchor_geoms_4326 if g is not None and not g.is_empty])
+        # Fall back to the full site footprint if the anchors dissolve to nothing (a
+        # degenerate zero-area way); a long conduit would otherwise drag a union centroid
+        # off the powerhouse entirely, which is why the anchors are preferred.
+        rep = (anchor_union.representative_point() if not anchor_union.is_empty
+               else site.representative_point())
 
         plant_mw = max([parse_power_mw(m["row"].get("plant:output:electricity"))
                         for m in ms if m["cls"] == "plant"] or [float("nan")])
@@ -629,6 +667,8 @@ def main() -> None:
     ap.add_argument("--link-m", type=float, default=150.0)
     ap.add_argument("--attach-m", type=float, default=150.0)
     ap.add_argument("--max-conduit-len-m", type=float, default=2000.0)
+    ap.add_argument("--pbf", type=Path, default=None,
+                    help="use this PBF verbatim instead of the dated-download logic")
     ap.add_argument("--refresh-pbf", action="store_true")
     ap.add_argument("--max-pbf-age-days", type=int, default=14)
     ap.add_argument("--allow-stale", action="store_true")
@@ -646,7 +686,7 @@ def main() -> None:
         raise SystemExit(f"refusing to write into the production label dir {PROD_LABELS}")
     prod_before = {p.name: p.stat().st_mtime for p in PROD_LABELS.glob("*.parquet")}
 
-    pbf, ts, age = fetch_pbf(a.refresh_pbf, a.max_pbf_age_days, a.allow_stale)
+    pbf, ts, age = fetch_pbf(a.refresh_pbf, a.max_pbf_age_days, a.allow_stale, a.pbf)
     feats = classify(extract(pbf, bbox, a.force))
 
     kw = dict(buffer_m=a.buffer_m, attach_m=a.attach_m,

@@ -19,7 +19,7 @@ from subdetect.config import (
     DEM_BANDS, LOCAL_BANDS, S1_BANDS, TOWER_PRIOR_BANDS, Settings, resolve_aoi,
 )
 from subdetect.imagery import annual_composite, s1_composite
-from subdetect.roi import CELL_DEG, select_cells
+from subdetect.roi import CELL_DEG, _snapped_origin, select_cells
 
 
 def run_compose(
@@ -31,6 +31,7 @@ def run_compose(
     limit: int = 0,
     workers: int = 1,
     bbox_filter: tuple[float, float, float, float] | None = None,
+    cells_file: Path | None = None,
 ) -> Path:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     log = logging.getLogger(__name__)
@@ -41,6 +42,27 @@ def run_compose(
     out_dir.mkdir(parents=True, exist_ok=True)
 
     cells = select_cells(aoi, cfg, settings, radius_km, min_voltage)
+    if cells_file:
+        # Explicit cell list, bypassing ROI selection entirely. The ROI rule is "within
+        # radius_km of a power line or substation", which structurally excludes targets
+        # that are not grid-adjacent -- remote micro-hydro, for instance. Cells named here
+        # that the ROI never selected are synthesised from the AOI's own lattice.
+        import pandas as pd
+
+        want = [ln.strip() for ln in Path(cells_file).read_text().split() if ln.strip()]
+        minx, miny = _snapped_origin(tuple(cfg["bbox"]), cfg.get("grid_origin"))
+        have = set(cells["name"]) if len(cells) else set()
+        extra = [w for w in want if w not in have]
+        rows = []
+        for name in extra:
+            ix, iy = int(name[:4]), int(name[5:])
+            rows.append({"ix": ix, "iy": iy, "name": name, "has_label": False,
+                         "line_km": 0.0, "lon0": minx + ix * CELL_DEG,
+                         "lat0": miny + iy * CELL_DEG})
+        cells = pd.concat([cells[cells["name"].isin(want)], pd.DataFrame(rows)],
+                          ignore_index=True) if rows else cells[cells["name"].isin(want)]
+        log.info("cells file %s: %d requested, %d from ROI, %d synthesised off-ROI",
+                 cells_file, len(want), len(want) - len(extra), len(extra))
     if bbox_filter:
         # Restrict to a sub-window of the AOI. Needed because the composites volume has
         # little headroom, and a derived layer is rarely wanted for every ROI cell.

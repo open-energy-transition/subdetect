@@ -58,6 +58,7 @@ def compose(
     limit: int = typer.Option(0, help="Cap number of cells (0 = all; label cells first)"),
     workers: int = typer.Option(1, help="Concurrent cells (I/O-bound; 3-6 is a good range)"),
     bbox: str = typer.Option("", help="Restrict to a lon0,lat0,lon1,lat1 sub-window of the AOI"),
+    cells_file: Path = typer.Option(None, help="File of cell names (one per line); bypasses ROI selection"),
 ) -> None:
     """Build S2 (or S1/towerprior/DEM) composites for an AOI's ROI cells (STAC, resumable)."""
     from subdetect.compose import run_compose
@@ -65,7 +66,7 @@ def compose(
     bbox_filter = tuple(float(x) for x in bbox.split(",")) if bbox else None
     run_compose(aoi=aoi, out_dir=out_dir, sensor=sensor, radius_km=radius_km,
                 min_voltage=min_voltage, limit=limit, workers=workers,
-                bbox_filter=bbox_filter)
+                bbox_filter=bbox_filter, cells_file=cells_file)
 
 
 @app.command()

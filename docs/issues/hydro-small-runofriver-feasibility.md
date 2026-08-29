@@ -151,13 +151,86 @@ holdout — and Chitral at 1–2/9 despite having the most sites (12).
 
 *(appended as stages complete)*
 
-### Stage 0 — labels
+### Stage 0 — labels (2026-08-29, `pakistan-latest.osm.pbf`, 2026-07-06 snapshot)
 
-_pending_
+**167 site complexes**, 153 inside Pakistan (14 flagged `east_of_76`, the Ladakh overlap).
 
-### Stage 1 — v9 probe
+| quantity | value |
+|---|---|
+| median **core** (powerhouse) area | **499 m²** |
+| median **site-complex** area | **27,389 m²** |
+| sites ≥ 20,000 m² | **142 (93%)** |
+| sites with core ≥ 2,000 m² (no buffer) | **34** |
+| sites with a penstock mapped | 33 |
+| holdout (Swat/Dir) | 30 sites |
 
-_pending_
+**The site-complex definition does what it was designed to do**: a 55× area increase moves
+93% of the corpus from a size class with a documented 0.000 recall into the ≥20,000 m²
+class where measured recall is 0.714. The unbuffered count (34) is the honest measure of
+how many sites could ever be attacked as powerhouse footprints — which is why they aren't.
+
+Core size distribution: `<1k` 100, `1k-2k` 16, `2k-5k` 16, `node_only` 14, `5k-20k` 12,
+`≥20k` 9. Clusters: swat_daral 18, chitral_golen 16, hunza 13, skardu 8, dir_panjkora 8,
+mangla_ajk 6, gilgit 5, kaghan 5, astore 4, warsak 3, tarbela 3, neelum 2.
+
+| gate | result | |
+|---|---|---|
+| G0.1 freshness | **FAIL** | 53 d old; fresh PBF downloading (Geofabrik at ~13 KB/s) |
+| G0.2 volume | PASS | 153 ≥ 120 |
+| G0.3 size | PASS | 142 (93%) ≥ 20k m², vs 100 / 60% required |
+| G0.4 spread | PASS | 8 clusters ≥ 5 sites, largest 12% |
+| G0.5 stability | PASS | site count moves 2.4% across `link_m` 100/150/250 |
+| G0.6 coverage | **FAIL** | **37%** have S2+S1 (need 60%) |
+
+**G0.6 is the live constraint, and its cause is structural.** Of the 80 cells holding the
+96 uncovered sites, 57 are inside the substation ROI but were never composited, and **23
+are outside the ROI entirely**. The ROI rule is "within 20 km of a mapped power line or
+substation" — which by construction excludes off-grid micro hydro, exactly the population
+of interest. Compose was therefore given an explicit `--cells-file` path that bypasses ROI
+selection (cells the ROI never selected are synthesised from the AOI lattice), and a fill
+pass over those 80 cells is running.
+
+Three correctness bugs were found and fixed while getting here, all of which would have
+failed silently:
+
+1. **`osmium export` emits closed ways twice** when `linear_tags` and `area_tags` are both
+   true — measured: 252 of 256 `power=plant` objects arrived as *both* a LineString and a
+   MultiPolygon. Undeduplicated, every closed-way plant would have been counted twice and
+   contributed two differently-shaped buffers to its own site. Deduplicated on
+   `(osm_type, osm_id)` keeping polygon > line > point.
+2. **`buffer(0)` on a Point returns an empty polygon.** The polygon-healing idiom, applied
+   blindly to all anchors, deleted all 59 generator *nodes* — a third of the corpus.
+3. **A killed download left a truncated PBF** that `wget -c`-on-existence logic treated as
+   complete. `--refresh-pbf` now always re-enters wget, and the header-timestamp read
+   catches a corrupt file loudly.
+
+### Stage 1 — v9 probe (`predictions_v9_fused/pakistan/prob_mean`, 398 rasters in window)
+
+| buffer | covered | no-coverage | median p_max | ≥ 0.4 seed | silent (p_max < 0.05) |
+|---|---|---|---|---|---|
+| 25 m | 57 | 110 | **0.000** | 5% | 88% |
+| 75 m | 58 | 109 | **0.000** | 9% | 83% |
+| 150 m | 61 | 106 | **0.000** | 13% | 80% |
+
+**G1.4 NULL — the pre-registered expected outcome.** Median peak probability is exactly
+0.000 at every buffer; 83% of covered sites are wholly silent. G1.0 also fails narrowly
+(58 covered vs 60 required), and coverage cannot improve without running inference on the
+new cells, which needs GPU and is out of Stage 1's scope.
+
+This kills the free-lunch route — re-ranking existing v9 candidates — and nothing else.
+The model was never taught this class in either direction: hydro `power=plant` polygons are
+burned as ignore (−1) in every substation chip mask, and `min_sub_area_m2` was 20,000 m²,
+~40× the median hydro powerhouse.
+
+**The switchyard split is the informative part.** Among covered sites, those with a mapped
+substation within 300 m reach a maximum probability of **1.000**; those without top out at
+**0.41**. Medians are 0.000 for both. So the handful of sites the model does see, it sees
+because of their switchyard — precisely the confound G1.2 was written to detect, visible
+here even though the overall result is null.
+
+Note also that `frac_p_max_ge_0.4` climbs 5% → 9% → 13% purely with buffer size. That is
+the mechanical artefact G1.3 exists to catch: a larger polygon captures more of a noisy
+raster. It is why `p_max` is never quoted here without the sweep beside it.
 
 ### Stage 4 — separability
 
