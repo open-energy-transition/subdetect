@@ -151,9 +151,17 @@ holdout — and Chitral at 1–2/9 despite having the most sites (12).
 
 *(appended as stages complete)*
 
-### Stage 0 — labels (2026-08-29, `pakistan-latest.osm.pbf`, 2026-07-06 snapshot)
+### Stage 0 — labels (re-run 2026-08-29 on a fresh `2026-08-28` snapshot)
 
-**167 site complexes**, 153 inside Pakistan (14 flagged `east_of_76`, the Ladakh overlap).
+**G0.1 now PASSES** (PBF age 1 d). The refresh was worth making: **101 hydro features are
+new** since the 2026-07-06 snapshot (3,114 → 3,213 in the northern window), and mapped
+penstocks went 33 → 35. Net site count barely moved (167 → 168), because most of the new
+features attach to sites that already existed rather than creating new ones — so the July
+numbers below stand, with 154 sites in PK and 143 (93%) ≥ 20,000 m².
+
+Only **G0.6 (imagery coverage)** still fails, at 41% and rising as the compose fill runs.
+
+**168 site complexes**, 154 inside Pakistan (14 flagged `east_of_76`, the Ladakh overlap).
 
 | quantity | value |
 |---|---|
