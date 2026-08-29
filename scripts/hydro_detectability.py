@@ -87,6 +87,7 @@ LOOSEN_ORDER = ["relief_1km", "rel_elev_500m", "elev_m"]
 D_RIVER_LOG_TOL = 0.5      # ~ +/-65% in metres
 VALID_FRAC_TOL = 0.15
 MIN_SEP_M = 300.0          # between accepted controls, so they are not one patch
+MIN_SITES_FOR_FEATURE_AUC = 10
 EXCLUDE_HYDRO_M = 1000.0
 EXCLUDE_INFRA_M = 500.0
 
@@ -390,11 +391,17 @@ def main() -> None:
     RESULTS.mkdir(parents=True, exist_ok=True)
     df.to_csv(RESULTS / "hydro_detectability_samples.csv", index=False)
 
-    pos = df[~df.is_control]
     neg = df[df.is_control]
     matched = set(neg.site_id)
+    # Balance is computed over MATCHED pairs only. Including sites that drew no control
+    # compares an unmatched positive population against someone else's controls, which is
+    # exactly the confounded comparison the matching exists to avoid -- and it made the
+    # first run report slope SMD 0.72 purely because the sites that failed to match were
+    # the steep ones.
+    pos_all = df[~df.is_control]
+    pos = pos_all[pos_all.site_id.isin(matched)]
     print("\n=== Stage 4: hydro site vs terrain-matched control ===")
-    print(f"sites with features: {len(pos)}   with >=1 control: {len(matched)}   "
+    print(f"sites with features: {len(pos_all)}   with >=1 control: {len(matched)}   "
           f"controls: {len(neg)}   median controls/site: "
           f"{neg.groupby('site_id').size().median() if len(neg) else 0:.0f}")
     print(f"sites needing a loosened caliper: {len(loosened_at)}")
@@ -408,7 +415,13 @@ def main() -> None:
                     "auc": rank_auc(pos[k].values, neg[k].values),
                     "median_site": float(pos[k].median()), "median_ctrl": float(neg[k].median())})
     balance = pd.DataFrame(bal)
-    balance["balanced"] = (balance.smd.abs() <= 0.10) & balance.auc.between(0.45, 0.55)
+    # A near-constant covariate (valid_frac_s2 is 1.000 in both arms wherever the composite
+    # is clean) has a meaningless SMD -- the denominator is ~0, so any rounding difference
+    # explodes it. Judge only covariates that actually vary.
+    balance["varies"] = [float(np.nanstd(np.r_[pos[k].values, neg[k].values])) > 1e-6
+                         for k in balance.covariate]
+    balance["balanced"] = (~balance.varies) | (
+        (balance.smd.abs() <= 0.10) & balance.auc.between(0.45, 0.55))
     print("\n--- covariate balance (must pass before any AUC below is meaningful) ---")
     print(balance.to_string(index=False, float_format=lambda v: f"{v:.3f}"))
     balance.assign(run_name=a.run_name).to_csv(RESULTS / "hydro_balance.csv", index=False)
@@ -416,10 +429,12 @@ def main() -> None:
     if not ok_balance:
         print("  !! unbalanced covariates: any S2/S1 AUC below is partly those covariates.")
 
+    # valid_frac_s2 is a QC covariate that is MATCHED on, not a feature: scoring it would
+    # report how well the matcher did, dressed up as detectability.
     feat_cols = [c for c in df.columns if c not in
                  {"run_name", "site_id", "cell", "cluster", "size_bucket", "split",
                   "is_control", "lon", "lat", "area_m2", "core_area_m2", "capacity_mw",
-                  "has_penstock", "conduit_tunnel_frac"}]
+                  "has_penstock", "conduit_tunnel_frac", "valid_frac_s2"}]
     # Within-site AUC then pooled: pooling all sites against all controls would
     # reintroduce exactly the between-site terrain variance the matching removes.
     per_feat = []
@@ -427,14 +442,21 @@ def main() -> None:
         aucs = [rank_auc(pos.loc[pos.site_id == s, f].values, neg.loc[neg.site_id == s, f].values)
                 for s in matched]
         aucs = np.array([x for x in aucs if np.isfinite(x)])
-        if aucs.size < 10:
+        if aucs.size < MIN_SITES_FOR_FEATURE_AUC:
             continue
         per_feat.append({"feature": f, "n_sites": aucs.size, "auc": float(aucs.mean()),
                          "auc_pooled": rank_auc(pos[f].values, neg[f].values),
                          "smd": smd(pos[f].values, neg[f].values)})
-    pf = pd.DataFrame(per_feat).sort_values("auc", key=lambda s: (s - 0.5).abs(), ascending=False)
-    print("\n--- top per-feature AUC (within-site, then averaged) ---")
-    print(pf.head(15).to_string(index=False, float_format=lambda v: f"{v:.3f}"))
+    pf = pd.DataFrame(per_feat)
+    if pf.empty:
+        print(f"\n!! only {len(matched)} sites drew controls -- too few for a per-feature AUC "
+              f"(needs >=10). The matching is the bottleneck, not the imagery: see the "
+              f"loosening report above.")
+        pf = pd.DataFrame(columns=["feature", "n_sites", "auc", "auc_pooled", "smd"])
+    else:
+        pf = pf.sort_values("auc", key=lambda s: (s - 0.5).abs(), ascending=False)
+        print("\n--- top per-feature AUC (within-site, then averaged) ---")
+        print(pf.head(15).to_string(index=False, float_format=lambda v: f"{v:.3f}"))
 
     summ = {"run_name": a.run_name, "eval_version": EVAL_VERSION, "seed": a.seed,
             "n_sites": len(pos), "n_sites_matched": len(matched), "n_controls": len(neg),

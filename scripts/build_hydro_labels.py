@@ -296,6 +296,57 @@ def _col(gdf: gpd.GeoDataFrame, key: str) -> pd.Series:
     return gdf[key].fillna("").astype(str)
 
 
+def extract_waterways(pbf: Path, bbox, force: bool) -> gpd.GeoDataFrame:
+    """waterway=river|stream linestrings -> the distance-to-stream matching covariate.
+
+    A separate osmium pass on purpose: rivers and streams outnumber the hydro features by
+    two orders of magnitude, and they are never part of a site complex -- they only ever
+    become a raster distance field in the Stage 4 control sampler. Keeping them out of the
+    hydro export keeps that file small and its config hash stable.
+    """
+    stem = f"{pbf.stem}_waterways"
+    filt = OSM_DIR / f"{stem}.osm.pbf"
+    clip = OSM_DIR / f"{stem}_clip.osm.pbf"
+    seq = OSM_DIR / f"{stem}.geojsonseq"
+    if force:
+        for q in (filt, clip, seq):
+            q.unlink(missing_ok=True)
+    if not filt.exists():
+        _run(["osmium", "tags-filter", "-o", str(filt), "--overwrite", str(pbf),
+              "w/waterway=river,stream"])
+    if not clip.exists():
+        _run(["osmium", "extract", "-s", "smart", "--overwrite",
+              "-b", ",".join(str(x) for x in bbox), "-o", str(clip), str(filt)])
+    if not seq.exists():
+        cfg = OSM_DIR / "waterway_export_config.json"
+        cfg.write_text(json.dumps({"attributes": {"type": "@type", "id": "@id"},
+                                   "linear_tags": True, "area_tags": False,
+                                   "include_tags": ["waterway", "name"]}))
+        _run(["osmium", "export", str(clip), "-f", "geojsonseq", "--overwrite",
+              "-c", str(cfg), "-o", str(seq)])
+    rows = []
+    with seq.open() as f:
+        for line in f:
+            line = line.strip().lstrip("\x1e")
+            if not line:
+                continue
+            try:
+                feat = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if feat.get("properties", {}).get("waterway") not in ("river", "stream"):
+                continue
+            try:
+                g = shape(feat["geometry"])
+            except Exception:  # noqa: BLE001
+                continue
+            if g.geom_type in ("LineString", "MultiLineString"):
+                rows.append({"waterway": feat["properties"]["waterway"], "geometry": g})
+    gdf = gpd.GeoDataFrame(rows, crs="EPSG:4326")
+    log.info("waterways: %d river/stream lines", len(gdf))
+    return gdf
+
+
 def classify(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     """Tag-based class assignment. Never geometry-type based.
 
@@ -688,6 +739,10 @@ def main() -> None:
 
     pbf, ts, age = fetch_pbf(a.refresh_pbf, a.max_pbf_age_days, a.allow_stale, a.pbf)
     feats = classify(extract(pbf, bbox, a.force))
+    try:
+        extract_waterways(pbf, bbox, a.force).to_parquet(out / "waterways.parquet")
+    except Exception as e:  # noqa: BLE001 -- a missing river layer degrades matching, not the labels
+        log.warning("waterway extraction failed (%s); Stage 4 matching will lack d_river", e)
 
     kw = dict(buffer_m=a.buffer_m, attach_m=a.attach_m,
               max_conduit_len_m=a.max_conduit_len_m, with_headrace=a.with_headrace)

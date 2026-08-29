@@ -73,7 +73,7 @@ def fit_auc(X, y, groups, seed=0):
 
     n_splits = min(5, len(np.unique(groups)))
     if n_splits < 2:
-        return float("nan"), None
+        return float("nan"), None, None
     oof = np.full(len(y), np.nan)
     for tr, te in GroupKFold(n_splits=n_splits).split(X, y, groups):
         if len(np.unique(y[tr])) < 2:
@@ -84,10 +84,14 @@ def fit_auc(X, y, groups, seed=0):
         oof[te] = m.predict_proba(X[te])[:, 1]
     ok = np.isfinite(oof)
     if ok.sum() < 10 or len(np.unique(y[ok])) < 2:
-        return float("nan"), None
+        return float("nan"), None, None
     full = make_pipeline(StandardScaler(),
                          LogisticRegression(max_iter=2000, C=1.0, random_state=seed)).fit(X, y)
-    return float(roc_auc_score(y[ok], oof[ok])), full
+    # `oof` is returned so the confidence interval can be built on OUT-OF-FOLD scores.
+    # Bootstrapping the full model's in-sample predictions gives a CI whose lower bound can
+    # exceed the CV point estimate -- observed here as ci_lo 0.975 against auc_cv 0.771 --
+    # which would wave G2.1 through on a number that never left the training set.
+    return float(roc_auc_score(y[ok], oof[ok])), full, oof
 
 
 def site_bootstrap(y, score, site_ids, n=1000, seed=0):
@@ -143,15 +147,15 @@ def main() -> None:
             continue
         aucs = []
         for sd in seeds:
-            auc, model = fit_auc(study[cols].values, y, groups, seed=sd)
+            auc, _m, _o = fit_auc(study[cols].values, y, groups, seed=sd)
             aucs.append(auc)
         auc = float(np.nanmean(aucs))
         spread = float(np.nanmax(aucs) - np.nanmin(aucs)) if len(aucs) > 1 else 0.0
-        _, model = fit_auc(study[cols].values, y, groups, seed=seeds[0])
+        _, model, oof = fit_auc(study[cols].values, y, groups, seed=seeds[0])
         lo = hi = h_auc = float("nan")
         if model is not None:
-            sc = model.predict_proba(study[cols].values)[:, 1]
-            lo, hi = site_bootstrap(y, sc, study.site_id.values, seed=seeds[0])
+            ok = np.isfinite(oof)
+            lo, hi = site_bootstrap(y[ok], oof[ok], study.site_id.values[ok], seed=seeds[0])
             if len(hold) and hold.is_control.nunique() > 1:
                 from sklearn.metrics import roc_auc_score
                 hy = (hold.is_control.values == False).astype(int)  # noqa: E712
@@ -169,7 +173,7 @@ def main() -> None:
         for g in np.unique(groups):
             m = groups == g
             yp[m] = rng.permutation(yp[m])
-        auc, _ = fit_auc(study[feat_cols].values, yp, groups, seed=0)
+        auc, _m, _o = fit_auc(study[feat_cols].values, yp, groups, seed=0)
         if np.isfinite(auc):
             null.append(auc)
     null = np.array(null)
@@ -214,7 +218,7 @@ def main() -> None:
             sid = grp[~grp.is_control].site_id.nunique()
             if sid < 5:
                 continue
-            auc, _ = fit_auc(grp[feat_cols].values,
+            auc, _m, _o = fit_auc(grp[feat_cols].values,
                              (grp.is_control.values == False).astype(int),  # noqa: E712
                              grp.cluster.values, seed=0)
             print(f"  {b:>10}  n_sites={sid:3d}  auc={auc:.3f}")
