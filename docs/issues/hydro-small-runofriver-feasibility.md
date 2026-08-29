@@ -291,6 +291,53 @@ result rather than crashed:
    been extracted. A separate `waterway=river,stream` pass (8,027 lines) fixed it, and
    matched sites/controls went from 6/43 to 19/209.
 
+## How to complete this study
+
+Everything except the final Stage 4 number is done. The remainder is unattended download:
+filling S2 + S1 + DEM for the hydro cells the substation ROI never covered.
+
+**Running now** (systemd user units, they survive a closed session):
+
+```bash
+systemctl --user status subdetect-hydro-s2      # S2 for the 80 uncovered cells
+systemctl --user status subdetect-hydro-fill    # follows it with S1, then DEM
+```
+
+Note both were launched with `--setenv=PATH=<repo>/.pixi/envs/default/bin:...`; without it
+`osmium` is not on the unit's PATH and the label build fails at the header-timestamp read.
+
+**Check coverage** (G0.6 wants ≥ 60% of 154 sites; Stage 4's G2.0 wants ≥ 80 *matched*
+sites, and roughly 90% of ready sites draw controls, so aim for ~95 with all three layers):
+
+```bash
+pixi run python -c "
+import geopandas as gpd; from pathlib import Path
+s=gpd.read_parquet('data/labels/pakistan_hydro/hydro_sites.parquet'); s=s[~s.east_of_76]
+C=Path('data/composites/pakistan/composites'); f=lambda c,n:(C/c/n).exists()
+print(sum(all(f(c,n) for n in ['composite_0.tif','composite_s1.tif','composite_dem.tif'])
+          for c in s.cell), '/', len(s))"
+```
+
+**Then run the real Stage 4** (CPU only, ~1–2 h):
+
+```bash
+pixi run python scripts/build_hydro_labels.py --refresh-pbf      # re-check G0.6
+pixi run -e ml python scripts/hydro_detectability.py --run-name north_pk_v1
+pixi run -e ml python scripts/hydro_stage4_model.py --run-name north_pk_v1
+```
+
+**Read the covariate balance table before any AUC.** It is what licenses them; if it does
+not pass, the S2/S1 numbers are partly the covariates it failed to control. Do not move a
+gate threshold after seeing a number — that is the failure mode this whole structure exists
+to prevent, and the v8/v8_run2 episode is the local precedent for how easily a good-looking
+single number evaporates.
+
+If Stage 4 passes, Stage 5 (chips + fine-tune) begins — and note two things settled here:
+use `--fraction` / `all_touched=False` from day one, since the 1.70× label inflation is
+worst in exactly this size class; and do **not** touch `pakistan.val_bbox`, which
+`chips._split_of` uses for every substation chip index. Add a new AOI with the same
+`grid_origin` instead.
+
 ## Verdict
 
-_pending_
+_pending Stage 4 — the imagery fill is the only thing in the way._
