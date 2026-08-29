@@ -234,7 +234,54 @@ raster. It is why `p_max` is never quoted here without the sweep beside it.
 
 ### Stage 4 — separability
 
-_pending_
+**Not yet run for real.** G2.0 requires ≥ 80 matched sites; only 40 hydro cells currently
+carry all three of S2 + S1 + DEM, because of the G0.6 coverage gap. The compose fill is
+running (aggregate link measured at 1.5 MB/s; S2 mountain cells are expensive, so this is
+an overnight job).
+
+A harness-validation pass was run on the 21 sites that are ready, purely to prove the
+machinery end to end. **These numbers are not a result** — 19 matched sites against a gate
+of 80, and the balance table does not pass:
+
+| feature group | CV AUC | CI lower (out-of-fold) | holdout |
+|---|---|---|---|
+| all | 0.771 | 0.584 | 0.954 |
+| S1 only | 0.846 | 0.758 | 0.954 |
+| S2 only | 0.796 | 0.647 | 0.824 |
+| **context/terrain only** | **0.474** | 0.283 | 0.685 |
+
+Top single features (within-site, then averaged): `vh_contrast_max` 0.918, `ndwi_max`
+0.899, `vv_contrast_max` 0.882, `mndwi_max` 0.864, `n_bright_px_5db_per_ha` 0.842.
+Permutation null (within-cluster, n=60): median 0.476, 95th percentile 0.598 — below the
+0.65 ceiling, so the pre-registered thresholds remain valid at this n.
+
+Two things are worth noting even from an underpowered run. First, **context-only sits at
+chance (0.474)**, which is the G2.4 ablation passing: the terrain matching did its job and
+whatever separation exists is in the imagery, not in "hydro plants are in valleys".
+Second, the strongest feature is the one predicted up front — S1 VH local contrast, the
+metal-roofed powerhouse as an isolated bright radar target.
+
+Against that, `ndwi_max` and `mndwi_max` ranking near the top deserves suspicion: a
+run-of-river plant sits *on* a river, and although controls are matched on distance-to-
+stream, the match is imperfect (median 127 m vs 182 m, SMD −0.185). Some of that water
+signal may be the river rather than a forebay. The full run must be read with the balance
+table in hand.
+
+Four bugs were found by this validation pass, every one of which would have inflated a
+result rather than crashed:
+
+1. **The bootstrap CI was built on in-sample predictions**, returning `ci_lo` 0.975 against
+   a CV AUC of 0.771. G2.1 gates on `ci_lo ≥ 0.68`, so this was a false-PASS generator.
+   Rebuilt on out-of-fold scores: `ci_lo` falls to 0.584 and the verdict correctly flips
+   from PASS to AMBIGUOUS.
+2. **Balance was computed over all positives**, including those that drew no control — an
+   unmatched positive population against someone else's controls. The sites that failed to
+   match were the steep ones, which alone produced a spurious slope SMD of 0.72.
+3. **`valid_frac_s2` was scored as a feature** although it is matched on, i.e. reporting
+   matcher quality as detectability.
+4. **`d_river_m` was uniformly 1e6** — the empty-mask sentinel — because no river layer had
+   been extracted. A separate `waterway=river,stream` pass (8,027 lines) fixed it, and
+   matched sites/controls went from 6/43 to 19/209.
 
 ## Verdict
 
