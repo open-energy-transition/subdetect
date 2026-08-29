@@ -48,19 +48,24 @@ def roi(
 def compose(
     aoi: str = typer.Option(..., help="AOI name"),
     sensor: str = typer.Option(
-        "s2", help="s2 (composite_0.tif), s1 (composite_s1.tif), or towerprior "
-                   "(composite_tower.tif -- derived from an existing composite_s1.tif, no STAC fetch)"),
+        "s2", help="s2 (composite_0.tif), s1 (composite_s1.tif), towerprior "
+                   "(composite_tower.tif -- derived from an existing composite_s1.tif, no STAC fetch), "
+                   "or dem (composite_dem.tif -- Copernicus GLO-30 elevation + slope/valley-position/relief, "
+                   "pinned to the cell's composite_0.tif grid)"),
     out_dir: Path = typer.Option(Path("data/composites")),
     radius_km: float = typer.Option(20.0, help="ROI radius (Pakistan; India uses max_train_cells)"),
     min_voltage: float = typer.Option(0.0),
     limit: int = typer.Option(0, help="Cap number of cells (0 = all; label cells first)"),
     workers: int = typer.Option(1, help="Concurrent cells (I/O-bound; 3-6 is a good range)"),
+    bbox: str = typer.Option("", help="Restrict to a lon0,lat0,lon1,lat1 sub-window of the AOI"),
 ) -> None:
-    """Build S2 (or S1) composites for an AOI's ROI cells (STAC, resumable)."""
+    """Build S2 (or S1/towerprior/DEM) composites for an AOI's ROI cells (STAC, resumable)."""
     from subdetect.compose import run_compose
 
+    bbox_filter = tuple(float(x) for x in bbox.split(",")) if bbox else None
     run_compose(aoi=aoi, out_dir=out_dir, sensor=sensor, radius_km=radius_km,
-                min_voltage=min_voltage, limit=limit, workers=workers)
+                min_voltage=min_voltage, limit=limit, workers=workers,
+                bbox_filter=bbox_filter)
 
 
 @app.command()
