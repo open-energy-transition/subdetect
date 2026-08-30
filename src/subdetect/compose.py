@@ -15,10 +15,11 @@ from pathlib import Path
 import rasterio
 from tqdm import tqdm
 
-from subdetect.config import LOCAL_BANDS, S1_BANDS, TOWER_PRIOR_BANDS, Settings, resolve_aoi
+from subdetect.config import (
+    DEM_BANDS, LOCAL_BANDS, S1_BANDS, TOWER_PRIOR_BANDS, Settings, resolve_aoi,
+)
 from subdetect.imagery import annual_composite, s1_composite
-from subdetect.roi import CELL_DEG, select_cells
-from subdetect.tower_prior import tower_prior_dn
+from subdetect.roi import CELL_DEG, _snapped_origin, select_cells
 
 
 def run_compose(
@@ -29,6 +30,8 @@ def run_compose(
     min_voltage: float = 0.0,
     limit: int = 0,
     workers: int = 1,
+    bbox_filter: tuple[float, float, float, float] | None = None,
+    cells_file: Path | None = None,
 ) -> Path:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     log = logging.getLogger(__name__)
@@ -39,13 +42,43 @@ def run_compose(
     out_dir.mkdir(parents=True, exist_ok=True)
 
     cells = select_cells(aoi, cfg, settings, radius_km, min_voltage)
+    if cells_file:
+        # Explicit cell list, bypassing ROI selection entirely. The ROI rule is "within
+        # radius_km of a power line or substation", which structurally excludes targets
+        # that are not grid-adjacent -- remote micro-hydro, for instance. Cells named here
+        # that the ROI never selected are synthesised from the AOI's own lattice.
+        import pandas as pd
+
+        want = [ln.strip() for ln in Path(cells_file).read_text().split() if ln.strip()]
+        minx, miny = _snapped_origin(tuple(cfg["bbox"]), cfg.get("grid_origin"))
+        have = set(cells["name"]) if len(cells) else set()
+        extra = [w for w in want if w not in have]
+        rows = []
+        for name in extra:
+            ix, iy = int(name[:4]), int(name[5:])
+            rows.append({"ix": ix, "iy": iy, "name": name, "has_label": False,
+                         "line_km": 0.0, "lon0": minx + ix * CELL_DEG,
+                         "lat0": miny + iy * CELL_DEG})
+        cells = pd.concat([cells[cells["name"].isin(want)], pd.DataFrame(rows)],
+                          ignore_index=True) if rows else cells[cells["name"].isin(want)]
+        log.info("cells file %s: %d requested, %d from ROI, %d synthesised off-ROI",
+                 cells_file, len(want), len(want) - len(extra), len(extra))
+    if bbox_filter:
+        # Restrict to a sub-window of the AOI. Needed because the composites volume has
+        # little headroom, and a derived layer is rarely wanted for every ROI cell.
+        x0, y0, x1, y1 = bbox_filter
+        n0 = len(cells)
+        cells = cells[(cells.lon0 >= x0) & (cells.lon0 <= x1)
+                      & (cells.lat0 >= y0) & (cells.lat0 <= y1)]
+        log.info("bbox filter %s: %d -> %d cells", bbox_filter, n0, len(cells))
     if limit:
         cells = cells.head(limit)
     s2_window = tuple(settings.raw.get("s2_window", ("2025-11-01", "2026-03-15")))
     s1_window = tuple(settings.raw.get("s1_window", ("2025-11-01", "2026-03-15")))
     layer = {"s2": "composite_0.tif", "s1": "composite_s1.tif",
-             "towerprior": "composite_tower.tif"}[sensor]
-    bands = {"s2": LOCAL_BANDS, "s1": S1_BANDS, "towerprior": TOWER_PRIOR_BANDS}[sensor]
+             "towerprior": "composite_tower.tif", "dem": "composite_dem.tif"}[sensor]
+    bands = {"s2": LOCAL_BANDS, "s1": S1_BANDS,
+             "towerprior": TOWER_PRIOR_BANDS, "dem": DEM_BANDS}[sensor]
     log.info("Compositing %s for %d cells of %s (%d workers) -> %s",
              sensor.upper(), len(cells), aoi, workers, layer)
 
@@ -68,11 +101,30 @@ def run_compose(
                 with rasterio.open(base) as b:
                     gbox = GeoBox((b.height, b.width), b.transform, b.crs)
                 res = s1_composite(bbox, date_range=s1_window, geobox=gbox)
+            elif sensor == "dem":
+                # Pinned to the cell's S2 grid so terrain aligns with composite_0 exactly,
+                # and derived on that metric grid (dx=dy=10 m) rather than on the DEM's
+                # own 4326 tiles -- same geobox trick as S1.
+                base = cell_dir / "composite_0.tif"
+                if not base.exists():
+                    return False
+                from odc.geo.geobox import GeoBox
+
+                from subdetect.terrain import dem_composite
+
+                with rasterio.open(base) as b:
+                    gbox = GeoBox((b.height, b.width), b.transform, b.crs)
+                res = dem_composite(bbox, geobox=gbox)
             else:  # towerprior: pure post-processing of the already-composited S1 layer,
                 # no STAC fetch — same grid as composite_s1.tif, so co-registration is free.
                 base = cell_dir / "composite_s1.tif"
                 if not base.exists():
                     return False
+                # Imported here, not at module scope: tower_prior pulls in scipy, and a
+                # module-level import made `subdetect.compose` unimportable in the data
+                # env — breaking `compose` for *every* sensor, not just towerprior.
+                from subdetect.tower_prior import tower_prior_dn
+
                 with rasterio.open(base) as b:
                     s1_arr = b.read()
                     res = (tower_prior_dn(s1_arr), b.transform, b.crs)

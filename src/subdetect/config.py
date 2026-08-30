@@ -48,6 +48,25 @@ S1_SCALE = 500.0
 # input before 2026-07-24; previously only used as a post-hoc lead-ranking feature.
 TOWER_PRIOR_BANDS = ["tower_prior"]
 
+# Copernicus DEM GLO-30 (PC `cop-dem-glo-30`, float32 metres, EPSG:4326 1-deg tiles at
+# 1 arcsec). Derived channels are computed AFTER reprojection onto the cell's metric UTM
+# geobox -- the same geobox trick s1_composite uses -- so dx=dy=10 m exactly and no
+# cos(lat) correction is needed. Added 2026-08-29 for run-of-river hydro, a class defined
+# by topography (valley floor, below a steep drop, beside a stream); see terrain.py.
+DEM_BANDS = ["elev_m", "slope_deg", "rel_elev_500m", "relief_1km"]
+# uint16 DN = 1 + round(clip(value + OFFSET, 0, 65534/SCALE) * SCALE); 0 = nodata,
+# mirroring S1_OFFSET_DB/S1_SCALE and tower_prior's reserved-zero convention.
+DEM_OFFSET = [500.0, 0.0, 0.0, 0.0]
+DEM_SCALE = [7.0, 700.0, 60000.0, 20.0]
+#   elev_m        -500..8862 m -> 0.14 m step (COP30 vertical accuracy is ~2-4 m)
+#   slope_deg     0..90        -> 0.0014 deg
+#   rel_elev_500m 0..1         -> 1.7e-5
+#   relief_1km    0..3276 m    -> 0.05 m (Karakoram 1 km relief peaks near 1500 m)
+# Model input feeds bands 1-3 only: a model given raw elevation learns "hydro lives at
+# 1500-2500 m", which memorises the training AOI instead of detecting anything.
+DEM_MODEL_BANDS = DEM_BANDS[1:]
+DEM_MODEL_DIV = [90.0, 1.0, 1000.0]  # -> roughly [0,1], as the tower prior already is
+
 # One full year of observations (unused for substations but kept for API parity).
 SEASONS = {
     "spring": ("2025-03-01", "2025-05-31"),
