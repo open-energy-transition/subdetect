@@ -118,8 +118,23 @@ Sindh, Pakistan (145 cells, 614 leads) — both bandwidth-bounded first passes
 over a much larger set of Osmose-flagged candidates. Full workflow, output
 column reference, and results: [docs/osmose-detect.md](docs/osmose-detect.md).
 
+## A second target class: small run-of-river hydro (feasibility study)
+
+The same pipeline was pointed at the small hydropower plants mapped across northern
+Pakistan — a much harder target, since the median powerhouse is ~500 m² (five Sentinel-2
+pixels) and sits below a size class where this model has never produced any response at all.
+Labelling the whole **site complex** (weir + channel + penstock + powerhouse, buffered)
+rather than the building clears that floor, and the class is measurably separable from
+terrain-matched controls — but at **AUC 0.737** against a 0.75 bar fixed in advance, so the
+verdict is *ambiguous*, and no GPU time was spent.
+
+Readable write-up with charts: **[docs/hydro-feasibility.md](docs/hydro-feasibility.md)**.
+Technical log with the pre-registered thresholds:
+[docs/issues/hydro-small-runofriver-feasibility.md](docs/issues/hydro-small-runofriver-feasibility.md).
+
 ## Documentation map
 
+- [docs/hydro-feasibility.md](docs/hydro-feasibility.md) — the small run-of-river hydro feasibility study, written for a general reader
 - [docs/architecture.md](docs/architecture.md) — full pipeline stage-by-stage, the earthpv relationship, and the `scripts/` catalogue
 - [docs/worked-example.md](docs/worked-example.md) — pixel-level walkthrough of one real detection
 - [docs/osmose-detect.md](docs/osmose-detect.md) — the Osmose regional workflow, output columns, real results

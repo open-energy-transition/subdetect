@@ -227,6 +227,7 @@ def main() -> None:
     # everything turns out to be a size story.
     if "core_area_m2" in study.columns:
         print("\n--- AUC by powerhouse size bucket (reporting, not a gate) ---")
+        bucket_rows = []
         for b, grp in study.groupby("size_bucket"):
             sid = grp[~grp.is_control].site_id.nunique()
             if sid < 5:
@@ -235,6 +236,17 @@ def main() -> None:
                              (grp.is_control.values == False).astype(int),  # noqa: E712
                              grp.group.values, seed=0)
             print(f"  {b:>10}  n_sites={sid:3d}  auc={auc:.3f}")
+            bucket_rows.append({"run_name": a.run_name, "eval_version": EVAL_VERSION,
+                                "size_bucket": b, "n_sites": sid, "auc": auc})
+        if bucket_rows:
+            bo = RESULTS / "hydro_size_buckets.csv"
+            bdf = pd.DataFrame(bucket_rows)
+            if bo.exists():
+                prev = pd.read_csv(bo)
+                prev = prev[~((prev.run_name == a.run_name)
+                              & (prev.eval_version == EVAL_VERSION))]
+                bdf = pd.concat([prev, bdf], ignore_index=True)
+            bdf.to_csv(bo, index=False)
 
     res.insert(0, "run_name", a.run_name)
     res["eval_version"] = EVAL_VERSION

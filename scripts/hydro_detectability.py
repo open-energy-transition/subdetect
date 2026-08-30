@@ -466,7 +466,12 @@ def main() -> None:
             "best_feature_auc": float(pf.iloc[0].auc) if len(pf) else np.nan,
             "generated": dt.datetime.now().isoformat(timespec="seconds")}
     out = RESULTS / "hydro_detectability.csv"
-    pf.assign(run_name=a.run_name, eval_version=EVAL_VERSION).to_csv(out, index=False)
+    pfo = pf.assign(run_name=a.run_name, eval_version=EVAL_VERSION)
+    if out.exists():  # append+dedup, so a prior run stays comparable instead of vanishing
+        prev = pd.read_csv(out)
+        prev = prev[~((prev.run_name == a.run_name) & (prev.eval_version == EVAL_VERSION))]
+        pfo = pd.concat([prev, pfo], ignore_index=True)
+    pfo.to_csv(out, index=False)
     outs = RESULTS / "hydro_detectability_summary.csv"
     row = pd.DataFrame([summ])
     if outs.exists():
