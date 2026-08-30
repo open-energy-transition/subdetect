@@ -358,6 +358,7 @@ def main() -> None:
                 continue
             fs.update({"d_river_m": float(np.nanmean(cov["d_river_m"][m]))})
             base = {"site_id": r.site_id, "cell": cell, "cluster": r.cluster,
+                    "cell_0p5": getattr(r, "cell_0p5", ""),
                     "size_bucket": r.size_bucket, "core_area_m2": r.core_area_m2,
                     "capacity_mw": r.capacity_mw, "has_penstock": r.has_penstock,
                     "conduit_tunnel_frac": r.conduit_tunnel_frac, "split": r.split,
@@ -434,7 +435,7 @@ def main() -> None:
     feat_cols = [c for c in df.columns if c not in
                  {"run_name", "site_id", "cell", "cluster", "size_bucket", "split",
                   "is_control", "lon", "lat", "area_m2", "core_area_m2", "capacity_mw",
-                  "has_penstock", "conduit_tunnel_frac", "valid_frac_s2"}]
+                  "has_penstock", "conduit_tunnel_frac", "valid_frac_s2", "cell_0p5"}]
     # Within-site AUC then pooled: pooling all sites against all controls would
     # reintroduce exactly the between-site terrain variance the matching removes.
     per_feat = []

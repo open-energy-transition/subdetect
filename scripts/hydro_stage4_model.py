@@ -50,7 +50,8 @@ log = logging.getLogger("hydro_stage4_model")
 S1_PREFIX = ("vv_", "vh_", "n_bright")
 TERRAIN = {"elev_m", "slope_deg", "rel_elev_500m", "relief_1km", "northness",
            "d_river_m", "slope_anomaly"}
-META = {"run_name", "site_id", "cell", "cluster", "size_bucket", "split", "is_control",
+META = {"run_name", "site_id", "cell", "cluster", "group", "cell_0p5", "size_bucket",
+        "split", "is_control",
         "lon", "lat", "area_m2", "core_area_m2", "capacity_mw", "has_penstock",
         "conduit_tunnel_frac", "valid_frac_s2"}
 
@@ -123,7 +124,18 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
     df = pd.read_csv(a.samples)
-    df = df[df.cluster.fillna("") != ""].copy()
+    # The named CLUSTERS boxes cover only ~60% of sites, and dropping the rest cost 34 of
+    # 82 matched sites. The group only has to capture spatial autocorrelation so a site and
+    # its neighbours share a fold, so fall back to the 0.5-degree cell where no named
+    # cluster applies. This is a power fix, not a threshold change.
+    df = df.copy()
+    grp = df.cluster.fillna("").astype(str)
+    if "cell_0p5" in df.columns:
+        grp = grp.where(grp != "", "c" + df.cell_0p5.astype(str))
+    else:
+        grp = grp.where(grp != "", "c" + df.cell.astype(str).str[:4])
+    df["group"] = grp
+    df = df[df.group != ""]
     feat_cols = [c for c in df.columns if c not in META and df[c].dtype.kind in "fi"]
     df = df.dropna(subset=feat_cols, how="any")
     if df.empty:
@@ -133,9 +145,10 @@ def main() -> None:
     hold = df[df.split == "holdout"]
     y = study.is_control.values == False  # noqa: E712
     y = y.astype(int)
-    groups = study.cluster.values
-    log.info("study rows %d (%d sites), holdout rows %d, %d features",
-             len(study), study[~study.is_control].site_id.nunique(), len(hold), len(feat_cols))
+    groups = study.group.values
+    log.info("study rows %d (%d sites, %d groups), holdout rows %d (%d sites), %d features",
+             len(study), study[~study.is_control].site_id.nunique(), study.group.nunique(),
+             len(hold), hold[~hold.is_control].site_id.nunique(), len(feat_cols))
 
     seeds = [int(s) for s in a.seeds.split(",")]
     rows = []
@@ -220,7 +233,7 @@ def main() -> None:
                 continue
             auc, _m, _o = fit_auc(grp[feat_cols].values,
                              (grp.is_control.values == False).astype(int),  # noqa: E712
-                             grp.cluster.values, seed=0)
+                             grp.group.values, seed=0)
             print(f"  {b:>10}  n_sites={sid:3d}  auc={auc:.3f}")
 
     res.insert(0, "run_name", a.run_name)

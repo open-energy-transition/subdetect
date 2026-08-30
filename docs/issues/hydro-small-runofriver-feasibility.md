@@ -240,56 +240,83 @@ Note also that `frac_p_max_ge_0.4` climbs 5% → 9% → 13% purely with buffer s
 the mechanical artefact G1.3 exists to catch: a larger polygon captures more of a noisy
 raster. It is why `p_max` is never quoted here without the sweep beside it.
 
-### Stage 4 — separability
+### Stage 4 — separability (2026-08-30, `north_pk_strict`, strict pre-registered calipers)
 
-**Not yet run for real.** G2.0 requires ≥ 80 matched sites; only 40 hydro cells currently
-carry all three of S2 + S1 + DEM, because of the G0.6 coverage gap. The compose fill is
-running (aggregate link measured at 1.5 MB/s; S2 mountain cells are expensive, so this is
-an overnight job).
+**G0.6 passed first** (64% coverage) after the compose fill reached 99/154 sites with all
+three layers, so this is the real run, not the earlier harness validation.
 
-A harness-validation pass was run on the 21 sites that are ready, purely to prove the
-machinery end to end. **These numbers are not a result** — 19 matched sites against a gate
-of 80, and the balance table does not pass:
+86 matched sites (65 study / 21 holdout), 1,028 terrain-matched controls, median 14 per
+site. **G2.0 PASSES.**
 
 | feature group | CV AUC | CI lower (out-of-fold) | holdout |
 |---|---|---|---|
-| all | 0.771 | 0.584 | 0.954 |
-| S1 only | 0.846 | 0.758 | 0.954 |
-| S2 only | 0.796 | 0.647 | 0.824 |
-| **context/terrain only** | **0.474** | 0.283 | 0.685 |
+| **all** | **0.737** | **0.676** | **0.671** |
+| S2 only | 0.665 | 0.604 | 0.606 |
+| S1 only | 0.614 | 0.546 | 0.623 |
+| context / terrain only | 0.593 | 0.551 | 0.591 |
 
-Top single features (within-site, then averaged): `vh_contrast_max` 0.918, `ndwi_max`
-0.899, `vv_contrast_max` 0.882, `mndwi_max` 0.864, `n_bright_px_5db_per_ha` 0.842.
-Permutation null (within-cluster, n=60): median 0.476, 95th percentile 0.598 — below the
-0.65 ceiling, so the pre-registered thresholds remain valid at this n.
+Permutation null (within-group shuffle, n=200): median 0.564, **95th percentile 0.621** —
+below the 0.65 ceiling, so the pre-registered thresholds remain valid at this n. p = 0.000.
 
-Two things are worth noting even from an underpowered run. First, **context-only sits at
-chance (0.474)**, which is the G2.4 ablation passing: the terrain matching did its job and
-whatever separation exists is in the imagery, not in "hydro plants are in valleys".
-Second, the strongest feature is the one predicted up front — S1 VH local contrast, the
-metal-roofed powerhouse as an isolated bright radar target.
+**VERDICT: AMBIGUOUS.** The signal is real — comfortably above the permutation null — but
+lands in the pre-declared 0.65–0.75 dead band, missing all three G2.1 conditions
+simultaneously and narrowly: CV 0.737 vs 0.75, CI lower 0.676 vs 0.68, holdout 0.671 vs
+0.70. Missing all three by a similar margin is a coherent picture rather than noise. It is
+equally clearly not a G2.2 failure.
 
-Against that, `ndwi_max` and `mndwi_max` ranking near the top deserves suspicion: a
-run-of-river plant sits *on* a river, and although controls are matched on distance-to-
-stream, the match is imperfect (median 127 m vs 182 m, SMD −0.185). Some of that water
-signal may be the river rather than a forebay. The full run must be read with the balance
-table in hand.
+Per G2.3 that permits **exactly one** pre-declared extension — multi-date temporal-max S1 —
+and then a decision. No open-ended tuning.
 
-Four bugs were found by this validation pass, every one of which would have inflated a
-result rather than crashed:
+**Recall by powerhouse size, the line that matters most:**
 
-1. **The bootstrap CI was built on in-sample predictions**, returning `ci_lo` 0.975 against
-   a CV AUC of 0.771. G2.1 gates on `ci_lo ≥ 0.68`, so this was a false-PASS generator.
-   Rebuilt on out-of-fold scores: `ci_lo` falls to 0.584 and the verdict correctly flips
-   from PASS to AMBIGUOUS.
-2. **Balance was computed over all positives**, including those that drew no control — an
-   unmatched positive population against someone else's controls. The sites that failed to
-   match were the steep ones, which alone produced a spurious slope SMD of 0.72.
-3. **`valid_frac_s2` was scored as a feature** although it is matched on, i.e. reporting
-   matcher quality as detectability.
-4. **`d_river_m` was uniformly 1e6** — the empty-mask sentinel — because no river layer had
-   been extracted. A separate `waterway=river,stream` pass (8,027 lines) fixed it, and
-   matched sites/controls went from 6/43 to 19/209.
+| core bucket | n sites | AUC |
+|---|---|---|
+| `node_only` | 9 | **0.374** |
+| `<1k` | 31 | 0.676 |
+| `1k-2k` | 5 | 0.712 |
+| `2k-5k` | 7 | 0.636 |
+| `5k-20k` | 7 | 0.731 |
+| `≥20k` | 6 | **0.758** |
+
+Detectability still tracks the **real built footprint**, not the buffer that was drawn
+around it. The site-complex label lifted the target above the *label-geometry* floor — that
+was its job, and it worked — but it did not manufacture signal where the ground has none.
+Node-only sites score *below chance*: their "complex" is a 75 m disc around a point whose
+position need not coincide with any structure, and they should probably be excluded from
+training rather than treated as positives.
+
+**Two honest limitations, both visible in the balance table:**
+
+| covariate | SMD | AUC | balanced |
+|---|---|---|---|
+| slope_deg | 0.074 | 0.527 | ✓ |
+| northness | −0.042 | 0.482 | ✓ |
+| rel_elev_500m | **−0.400** | 0.380 | ✗ |
+| elev_m | 0.311 | 0.580 | ✗ |
+| valid_frac_s2 | −0.232 | 0.601 | ✗ |
+| d_river_m | −0.177 | 0.399 | ✗ |
+| relief_1km | 0.133 | 0.539 | ✗ |
+
+1. **Balance fails on valley position and river distance, and tightening the calipers does
+   not fix it.** A strict re-run (`--max-loosen 0`) gave 82 matched sites and near-identical
+   numbers, so this is structural, not a loosening artefact: hydro sites occupy the extreme
+   low end of the valley-position distribution (median `rel_elev_500m` 0.186 vs 0.275 for
+   controls) and hug rivers more tightly (65 m vs 107 m) than *any available* control can.
+   There is simply not enough valley floor in these catchments to match against. So part of
+   the measured separation is unavoidably "lower and nearer the water", and `context`-only
+   sitting at 0.593 rather than 0.500 quantifies that residue. G2.4 still passes — the
+   0.144 gap to `all` says the classifier is not merely reading landform — but the AUCs
+   above should be read as an upper bound.
+2. **The permutation null centres on 0.564, not 0.500.** A clean null should sit at chance.
+   The residual is most likely the site/control geometry asymmetry (irregular real polygons
+   vs circular control discs of matched area). It is below the pre-registered 0.65 ceiling
+   so the gates stand, but any future run should shrink it — matching control *shape* as
+   well as area is the obvious fix.
+
+**Also worth recording: the n=19 harness-validation numbers were badly inflated.**
+`vh_contrast_max` read 0.918 at n=19 and 0.704 at n=82; the multivariate `all` arm went
+0.771 → 0.737 with a far lower CI. This is the v8/v8_run2 lesson repeating exactly, and is
+why G2.0 exists as a gate rather than a footnote.
 
 ## How to complete this study
 
