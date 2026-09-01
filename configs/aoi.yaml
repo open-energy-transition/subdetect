@@ -55,7 +55,7 @@ aois:
   # s2_pre_window is the pre-construction epoch for --sensor s2pre: 2018 is dense in the
   # L2A archive and predates essentially all grid-scale BESS in these three markets.
   gb_bess:
-    bbox: [-8.2, 49.8, 2.0, 59.0]
+    bbox: [-8.2, 49.8, 2.0, 61.1]   # north to 61.1 to include Orkney/Shetland
     division: { name: Great Britain, country: GB, subtype: country }
     s2_window: ["2025-05-01", "2025-09-15"]
     s1_window: ["2025-05-01", "2025-09-15"]

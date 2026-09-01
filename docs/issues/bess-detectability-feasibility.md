@@ -229,9 +229,67 @@ region's fitted scaler and model, scored once, at the end of Stage 2b.
 
 *(appended per stage; empty at pre-registration)*
 
-### Stage 0 — labels
+### Stage 0 — labels (2026-09-01, PBFs of 2026-08-31/09-01, `--region all`)
 
-Not yet run.
+**GATE 0: FAIL — 8 of 10 gates pass; G0.3 (size) and G0.5 (same-cell controls) fail.**
+No imagery has been bought. Total cost so far: three PBF downloads (4.0 GB).
+
+511 battery sites in AOI — **GB 232, TX 176, CA 103** — from 13,761 substation polygons,
+13,268 of which are eligible Tier-2 controls.
+
+| gate | result | measured |
+|---|---|---|
+| G0.0 tag audit | PASS | written before the definition was fixed |
+| G0.1 freshness | PASS | oldest PBF 1 d |
+| G0.2 volume | PASS | 232 / 176 / 103, pooled 511 (need 120 / 60 / 250) |
+| **G0.3 size** | **FAIL** | median site 20,329 m² (needs ≥5,000 — passes) but **51% ≥20,000 m² (needs ≥60%)** |
+| G0.3b node fraction | PASS | 1% node-only |
+| G0.4 spread | PASS | 32 half-degree cells with ≥5 sites, largest holds 2% |
+| **G0.5 Tier-2 pool** | **FAIL** | 94% of sites have ≥3 area-matched controls (passes) but **37% have a same-cell one (needs ≥80%)** |
+| G0.7 construction dates | PASS | 62% pooled — but **GB alone is 29%**, below the 40% clause |
+| G0.8 stability | PASS | site count moves 1.6% across `link_m ∈ {40, 60, 120}` |
+| G0.9 non-interference | PASS | production labels and the Pakistan composite tree unchanged |
+| G0.10 budget | PASS at the cap | 1,343 cells wanted (~43.5 GB); capped by rank to 800 (~25.9 GB) |
+
+Per region:
+
+| region | n | median site | median core | ≥20k m² | core <2k m² | dated | hybrid | substation ≤300 m | overlaps substation |
+|---|---|---|---|---|---|---|---|---|---|
+| GB | 232 | 16,817 m² | 4,697 m² | 39% | 17% | 29% | 0.4% | 67% | 33% |
+| CA | 103 | 44,986 m² | 19,821 m² | 84% | 10% | 86% | **37%** | 71% | 44% |
+| TX | 176 | 17,359 m² | 5,414 m² | 47% | 38% | 92% | 4% | **92%** | 51% |
+
+**G0.6 co-location census — the study's central risk, quantified.** 76% of sites have a
+mapped substation within 300 m and **41% of site polygons physically overlap one** (TX 92%
+and 51%). This is materially worse than the hydro analogue and confirms that a Tier-1-only
+result would have been close to meaningless. 504 of 511 sites do retain a battery-only
+sub-polygon ≥ 2,000 m² after subtracting overlapping substations buffered 30 m, so the
+G2.4-T2 arm is computable.
+
+**Tag audit (G0.0).** The assumed pattern dominates but is not the whole story:
+`plant:source=battery` 174 (TX) / 64 (CA), `generator:source=battery` 30 / 58, plus
+`plant:source=solar;battery` and `battery;solar` hybrids and one `gas;battery`. Free-text
+name hints matched 68 objects in TX that carry no battery tag; per the pre-registered
+definition these are **not** positives, and they are also excluded from the control pool.
+
+**Hybrids.** 46 pooled sites (9%) co-tag generation with the battery — 37% of CA sites,
+almost all `solar`/`photovoltaic`. Their footprint is mostly PV panels, so "detecting" one
+would largely be detecting the solar farm. They stay in the positive set (the definition is
+pre-registered and moving it after seeing data is what pre-registration forbids) and are
+flagged `is_hybrid` for a G2.6 stratum.
+
+**Why G0.3 fails.** Unbuffered core area: p10 1,003 m², p25 2,339, **p50 6,737**, p75
+19,188, p90 52,442. So 77% clear the 2,000 m² floor below which this pipeline has measured
+`p_max` of exactly 0.000, and 79% of the buffered labels clear 10,000 m² — but only 51%
+clear the 20,000 m² bucket the gate demanded. The class is *not* below the pipeline's
+absolute floor; it is below the pre-registered bar for the bucket where the pipeline has
+demonstrated recall. GB and TX drive the failure; CA alone would pass at 84%.
+
+**Why G0.5 fails.** 94% of sites have ≥3 area-matched battery-free substations, and the
+median distance to the nearest one is 6.7 km — but only 37% find one inside the same 0.1°
+(~10 km) cell. 61% have one within 10 km, 80% within 20 km, 88% within 40 km. The
+thickness of the control strata is fine; what fails is the specific same-cell
+operationalisation of the acquisition-confound control.
 
 ### Stage 1 — production-detector probe
 
