@@ -48,7 +48,10 @@ def roi(
 def compose(
     aoi: str = typer.Option(..., help="AOI name"),
     sensor: str = typer.Option(
-        "s2", help="s2 (composite_0.tif), s1 (composite_s1.tif), towerprior "
+        "s2", help="s2 (composite_0.tif), s2pre (composite_pre.tif -- a second, "
+                   "pre-construction S2 composite from the AOI's s2_pre_window, pinned to "
+                   "the cell's composite_0.tif grid for bi-temporal change features), "
+                   "s1 (composite_s1.tif), towerprior "
                    "(composite_tower.tif -- derived from an existing composite_s1.tif, no STAC fetch), "
                    "or dem (composite_dem.tif -- Copernicus GLO-30 elevation + slope/valley-position/relief, "
                    "pinned to the cell's composite_0.tif grid)"),
