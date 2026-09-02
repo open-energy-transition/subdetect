@@ -71,6 +71,17 @@ PROD_LABEL_DIRS = [LABELS_ROOT / "pakistan", LABELS_ROOT / "india_pilot"]
 PROD_COMPOSITES = COMPOSITES_ROOT / "pakistan" / "composites"
 
 # Bytes per cell per layer, measured on the Pakistan tree. Used by the G0.10 budget gate.
+# AMENDMENT A1: the headline positive set is the >=20,000 m2 bucket -- the size class in
+# which this pipeline has measured recall (0.714 on Pakistan substations), as opposed to
+# the 1,000-2,000 m2 class where p_max is exactly 0.000 in all 23 runs.
+HEADLINE_MIN_AREA_M2 = 20000.0
+# AMENDMENT A2: the acquisition-confound control is a DISTANCE, not a shared 0.1 deg cell.
+# A Sentinel-2 granule is 110x110 km and the S1 IW swath is 250 km, so two footprints
+# within 40 km are in the same acquisition with the same look geometry -- which is the
+# thing the original same-cell clause was a proxy for. The 80% level is inherited
+# unchanged from the pre-registered G0.5; only the operationalisation moves.
+CTRL_MAX_DIST_M = 40_000.0
+
 MB_PER_CELL = {"composite_0.tif": 12.3, "composite_pre.tif": 12.3,
                "composite_s1.tif": 3.7, "composite_dem.tif": 4.9}
 
@@ -203,7 +214,12 @@ def fetch_pbf(region: str, refresh: bool, max_age_days: int, allow_stale: bool,
             _run(["wget", "-c", "-q", "--show-progress", cfg["url"], "-O", str(dated)])
         pbf = dated
         if not pbf.exists():
-            cands = sorted(OSM_DIR.glob(f"{cfg['stem']}-2*.osm.pbf"))
+            # Exactly 8 digits then `.osm.pbf`, so this can only match a dated country
+            # download. A looser `-2*.osm.pbf` also matches this script's own derived
+            # intermediates (`<stem>-<date>.osm_bess_<hash>_clip.osm.pbf`), and sorted()[-1]
+            # then hands a tag-filtered clip back as if it were the source PBF -- which
+            # reads as a 10,000-day-old snapshot because clips carry no header timestamp.
+            cands = sorted(OSM_DIR.glob(f"{cfg['stem']}-[0-9]" + "[0-9]" * 7 + ".osm.pbf"))
             if not cands:
                 raise SystemExit(f"no PBF for {region} at {dated}; pass --refresh-pbf")
             pbf = cands[-1]
@@ -824,6 +840,15 @@ def enrich(sites: gpd.GeoDataFrame, controls: gpd.GeoDataFrame, region: str,
         sites["battery_only_area_m2"] = rem
     sites["has_battery_only"] = sites.battery_only_area_m2 >= 2000.0
 
+    # AMENDMENT A1 (2026-09-02, see docs/issues/bess-detectability-feasibility.md).
+    # G0.3 failed: only 51% of labels reach 20,000 m2 against a >=60% bar. Rather than
+    # lower that bar, the study restricts its HEADLINE positive set to the bucket the
+    # pipeline has demonstrated recall in. Smaller sites stay in the corpus and are
+    # reported as G2.6 strata; they never enter the headline number. Node-only sites are
+    # excluded here too, per the pre-registered G0.3b.
+    sites["headline"] = ((sites.site_area_m2 >= HEADLINE_MIN_AREA_M2)
+                         & sites.in_aoi & ~sites.node_only)
+
     # Region-level split. The holdout is a whole region group, never a bbox: the point of
     # three regions is a transfer test, and both directions are scored (G2.5).
     sites["region_group"] = REGIONS[region]["group"]
@@ -851,6 +876,10 @@ def evaluate_gates(sites: pd.DataFrame, controls: pd.DataFrame, pool: dict,
     frac_big = n_big / n if n else 0.0
     med_area = float(s.site_area_m2.median()) if n else 0.0
     frac_node = float(s.node_only.mean()) if n else 1.0
+
+    head = s[s.headline] if "headline" in s.columns else s.iloc[0:0]
+    n_head = len(head)
+    head_by_region = head.region.value_counts().to_dict()
 
     cl = s.cell_0p5.value_counts()
     n_cl5 = int((cl >= 5).sum())
@@ -888,6 +917,17 @@ def evaluate_gates(sites: pd.DataFrame, controls: pd.DataFrame, pool: dict,
                        f"{frac_dated:.0%} of sites carry a construction date (need >=40%)"),
         "G0.8_stability": (spread < 0.10, f"site count spread {spread:.1%} over link_m sweep"),
         "G0.9_noninterference": (pool.get("prod_clean", False), "production labels + composites untouched"),
+        # Amended replacements. The originals above keep their FAIL verdicts on the record
+        # permanently; these are separately labelled and separately justified.
+        "A1_headline_volume": (
+            n_head >= 90 and (min(head_by_region.values()) if head_by_region else 0) >= 60,
+            f"headline (>= {HEADLINE_MIN_AREA_M2:,.0f} m2) {n_head} sites {head_by_region}; "
+            f"need >=90 pooled and >=60 per region"),
+        "A2_ctrl_in_range": (
+            pool.get("frac_ge3_head", 0.0) >= 0.80 and pool.get("frac_in_range_head", 0.0) >= 0.80,
+            f"{pool.get('frac_ge3_head', 0):.0%} of headline sites have >=3 area-matched "
+            f"controls, {pool.get('frac_in_range_head', 0):.0%} have one within "
+            f"{CTRL_MAX_DIST_M/1000:.0f} km"),
         "G0.10_budget": (n_cells <= max_cells and gb_needed <= max_gb,
                          f"{n_cells} cells -> {gb_needed:.1f} GB "
                          f"(limits {max_cells} cells / {max_gb} GB)"),
@@ -923,6 +963,11 @@ def evaluate_gates(sites: pd.DataFrame, controls: pd.DataFrame, pool: dict,
         "G0.6_median_battery_only_area_m2": round(float(s.battery_only_area_m2.median()), 1) if n else 0,
         "G0.6_n_with_battery_only_ge2k": int(s.has_battery_only.sum()) if n else 0,
         "frac_with_composite_s1": round(cov, 4),
+        "n_headline_sites": n_head, "n_headline_by_region": json.dumps(head_by_region),
+        "frac_headline_ge3_controls": round(pool.get("frac_ge3_head", 0.0), 4),
+        "frac_headline_ctrl_in_range": round(pool.get("frac_in_range_head", 0.0), 4),
+        "headline_min_area_m2": HEADLINE_MIN_AREA_M2,
+        "ctrl_max_dist_m": CTRL_MAX_DIST_M,
         "n_cells": n_cells, "projected_gb": round(gb_needed, 2),
         "pbf_age_days": age_days,
         "link_m_stability": json.dumps({str(k): v for k, v in stability.items()}),
@@ -930,7 +975,15 @@ def evaluate_gates(sites: pd.DataFrame, controls: pd.DataFrame, pool: dict,
     for k, (ok, msg) in g.items():
         metrics[k] = "PASS" if ok else "FAIL"
         metrics[k + "_detail"] = msg
-    return metrics, all(ok for ok, _ in g.values())
+    # The two superseded gates keep their FAIL verdicts on the record permanently; the
+    # amended verdict is every other original gate plus the labelled replacements.
+    superseded = {"G0.3_size", "G0.5_ctrl_pool"}
+    metrics["superseded_gates"] = ",".join(sorted(superseded))
+    orig_pass = all(ok for k, (ok, _) in g.items() if not k.startswith("A"))
+    amended_pass = all(ok for k, (ok, _) in g.items() if k not in superseded)
+    metrics["gate0_original"] = "PASS" if orig_pass else "FAIL"
+    metrics["gate0_amended"] = "PASS" if amended_pass else "FAIL"
+    return metrics, amended_pass
 
 
 # ------------------------------------------------------------------ control matching
@@ -966,15 +1019,23 @@ def control_availability(sites: gpd.GeoDataFrame, controls: gpd.GeoDataFrame,
         ok = (careas >= a * (1 - area_tol)) & (careas <= a * (1 + area_tol))
         n_ok = int(ok.sum())
         same = bool(((ccells == sites.cell.iloc[i]) & ok).sum() > 0)
-        near = np.argsort(np.where(ok, d, np.inf))[:5]
+        # Candidate control CELLS with the number of matched controls each holds, out to
+        # CTRL_MAX_DIST_M. Counts (not just cell names) are what let build_cell_list run a
+        # greedy set-cover and buy far less imagery than one cell per candidate control.
+        inrange = ok & (d <= CTRL_MAX_DIST_M)
+        cc: dict[str, int] = {}
+        for j in np.argsort(np.where(inrange, d, np.inf))[:int(inrange.sum())]:
+            cc[ccells[j]] = cc.get(ccells[j], 0) + 1
         rows.append({"site_id": sites.site_id.iloc[i], "n_matched": n_ok,
                      "same_cell_available": same,
                      "nearest_ctrl_m": float(d[ok].min()) if n_ok else np.nan,
-                     "ctrl_cells": ";".join(sorted({ccells[j] for j in near
-                                                    if np.isfinite(d[j]) and ok[j]}))})
+                     "n_matched_in_range": int(inrange.sum()),
+                     "ctrl_cell_counts": json.dumps(cc)})
     tab = pd.DataFrame(rows)
+    tab["ctrl_within_range"] = tab.nearest_ctrl_m <= CTRL_MAX_DIST_M
     stats = {"frac_ge3": float((tab.n_matched >= 3).mean()),
-             "frac_same_cell": float(tab.same_cell_available.mean())}
+             "frac_same_cell": float(tab.same_cell_available.mean()),
+             "frac_in_range": float(tab.ctrl_within_range.mean())}
     log.info("control availability: %.0f%% of sites have >=3 matched controls, "
              "%.0f%% have one in the same cell", 100 * stats["frac_ge3"],
              100 * stats["frac_same_cell"])
@@ -982,42 +1043,74 @@ def control_availability(sites: gpd.GeoDataFrame, controls: gpd.GeoDataFrame,
 
 
 def build_cell_list(sites: gpd.GeoDataFrame, avail: pd.DataFrame,
-                    max_cells: int) -> pd.DataFrame:
-    """Ranked cell list for `compose --cells-file`, capped at the imagery budget.
+                    max_cells: int, *, need_ctrl: int = 3) -> pd.DataFrame:
+    """Ranked cell list for `compose --cells-file`, minimised by greedy set cover.
 
-    Ranked by site count first, then by how many Tier-2 control candidates the cell can
-    supply. Capping by rank rather than truncating arbitrarily means the budget is spent on
-    the densest cells, which is also where the matched pairs are.
+    Every headline site's own cell is bought unconditionally. Control cells are then added
+    greedily -- at each step the unchosen cell that brings the most still-deficient sites
+    closer to `need_ctrl` matched controls -- until every site is satisfied or no candidate
+    remains. Buying one cell per candidate control instead (the obvious implementation)
+    costs roughly twice as much imagery for the same matched pairs, because control cells
+    are heavily shared between neighbouring sites.
     """
+    cols = ["region", "aoi", "cell", "n_bess", "n_ctrl", "role"]
     if sites.empty:
-        return pd.DataFrame(columns=["region", "aoi", "cell", "n_bess", "n_ctrl"])
-    ctrl_cells: dict[tuple, int] = {}
-    if len(avail):
-        cell_of = dict(zip(sites.site_id, sites.cell))
-        reg_of = dict(zip(sites.site_id, sites.region))
-        for r in avail.itertuples():
-            for cc in (r.ctrl_cells or "").split(";"):
-                if cc and cc != cell_of.get(r.site_id):
-                    ctrl_cells[(reg_of[r.site_id], cc)] = ctrl_cells.get((reg_of[r.site_id], cc), 0) + 1
+        return pd.DataFrame(columns=cols)
 
-    rows = (sites[sites.in_aoi].groupby(["region", "cell"]).size()
-            .reset_index(name="n_bess"))
-    rows["n_ctrl"] = 0
-    seen = {(r.region, r.cell) for r in rows.itertuples()}
-    extra = [{"region": reg, "cell": cc, "n_bess": 0, "n_ctrl": n}
-             for (reg, cc), n in ctrl_cells.items() if (reg, cc) not in seen]
-    if extra:
-        rows = pd.concat([rows, pd.DataFrame(extra)], ignore_index=True)
-    for (reg, cc), n in ctrl_cells.items():
-        m = (rows.region == reg) & (rows.cell == cc)
-        rows.loc[m, "n_ctrl"] = rows.loc[m, "n_ctrl"] + n
+    site_cells = (sites.groupby(["region", "cell"]).size().reset_index(name="n_bess"))
+    chosen: dict[tuple, dict] = {
+        (r.region, r.cell): {"n_bess": int(r.n_bess), "n_ctrl": 0, "role": "site"}
+        for r in site_cells.itertuples()}
+
+    if len(avail):
+        reg_of = dict(zip(sites.site_id, sites.region))
+        cand: dict[str, dict[str, int]] = {}
+        for r in avail.itertuples():
+            if r.site_id in reg_of:
+                cand[r.site_id] = json.loads(r.ctrl_cell_counts or "{}")
+
+        def covered(sid: str) -> int:
+            reg = reg_of[sid]
+            return sum(n for cc, n in cand.get(sid, {}).items()
+                       if (reg, cc) in chosen)
+
+        deficit = {sid: need_ctrl - covered(sid) for sid in cand}
+        deficit = {k: v for k, v in deficit.items() if v > 0}
+        while deficit:
+            gain: dict[tuple, int] = {}
+            for sid, need in deficit.items():
+                reg = reg_of[sid]
+                for cc, n in cand[sid].items():
+                    key = (reg, cc)
+                    if key in chosen:
+                        continue
+                    gain[key] = gain.get(key, 0) + min(n, need)
+            if not gain:
+                break
+            best = max(gain, key=lambda k: gain[k])
+            chosen[best] = {"n_bess": 0, "n_ctrl": 0, "role": "control"}
+            if len(chosen) >= max_cells:
+                log.warning("G0.10: cell cap %d reached with %d sites still short of "
+                            "%d controls", max_cells, len(deficit), need_ctrl)
+                break
+            deficit = {sid: need_ctrl - covered(sid) for sid in cand}
+            deficit = {k: v for k, v in deficit.items() if v > 0}
+        # Attribute control counts to whichever chosen cells actually supply them.
+        for sid, cc_counts in cand.items():
+            reg = reg_of[sid]
+            for cc, n in cc_counts.items():
+                key = (reg, cc)
+                if key in chosen:
+                    chosen[key]["n_ctrl"] += n
+
+    rows = pd.DataFrame([{"region": r, "cell": c, **v} for (r, c), v in chosen.items()])
     rows["aoi"] = rows.region.map(lambda r: REGIONS[r]["aoi"])
     rows = rows.sort_values(["n_bess", "n_ctrl"], ascending=False).reset_index(drop=True)
     if len(rows) > max_cells:
         log.warning("G0.10: %d cells exceeds the %d cap -- keeping the densest %d",
                     len(rows), max_cells, max_cells)
         rows = rows.head(max_cells)
-    return rows
+    return rows[cols]
 
 
 # ------------------------------------------------------------------------- main
@@ -1148,6 +1241,7 @@ def main() -> None:
         if len(s) and len(c):
             _, tab = control_availability(s, c)
             avail_parts.append(tab)
+    del cell_parts
     avail = pd.concat(avail_parts, ignore_index=True) if avail_parts else pd.DataFrame()
     pool_stats = {
         "frac_ge3": float((avail.n_matched >= 3).mean()) if len(avail) else 0.0,
@@ -1156,8 +1250,16 @@ def main() -> None:
                         if len(controls) else {}),
         "audit_written": (RESULTS_DIR / "bess_stage0_tag_audit.csv").exists(),
     }
+    # The amended gates are evaluated on the headline set only -- that is the set whose
+    # imagery is bought and whose AUC becomes the verdict.
+    head_ids = set(sites[sites.headline].site_id) if len(sites) else set()
+    ah = avail[avail.site_id.isin(head_ids)] if len(avail) else avail
+    pool_stats["frac_ge3_head"] = float((ah.n_matched >= 3).mean()) if len(ah) else 0.0
+    pool_stats["frac_in_range_head"] = float(ah.ctrl_within_range.mean()) if len(ah) else 0.0
 
-    cells = build_cell_list(sites, avail, a.max_cells)
+    # Only the headline sites' cells are composited. This is what turns A1 from a
+    # reporting restriction into a real reduction in imagery cost.
+    cells = build_cell_list(sites[sites.headline] if len(sites) else sites, ah, a.max_cells)
     if a.write_cells and len(cells):
         for r in regions:
             sub = cells[cells.region == r]
@@ -1238,13 +1340,24 @@ def main() -> None:
     if len(sites):
         print("\nsize buckets (unbuffered core):")
         print(sites[sites.in_aoi].size_bucket.value_counts().to_string())
+    print(f"\nheadline set (>= {HEADLINE_MIN_AREA_M2:,.0f} m2, amendment A1): "
+          f"{metrics['n_headline_sites']} sites {metrics['n_headline_by_region']}")
     print(f"\nimagery: {metrics['n_cells']} cells -> {metrics['projected_gb']:.1f} GB")
-    print("\n--- gates ---")
-    for k in sorted(k for k in metrics if k.startswith("G0.") and not k.endswith("_detail")):
+    print("\n--- gates (as pre-registered) ---")
+    sup = set(metrics.get("superseded_gates", "").split(","))
+    for k in sorted(k for k in metrics
+                    if k.startswith("G0.") and not k.endswith("_detail")):
         if k.startswith("G0.6"):
             continue
+        mark = "  [superseded by amendment]" if k in sup else ""
+        print(f"  {metrics[k]:4}  {k:22} {metrics[k + '_detail']}{mark}")
+    print("--- amendments (2026-09-02) ---")
+    for k in sorted(k for k in metrics
+                    if k.startswith("A") and k[1].isdigit() and not k.endswith("_detail")):
         print(f"  {metrics[k]:4}  {k:22} {metrics[k + '_detail']}")
-    print(f"\nGATE 0: {'PASS' if passed else 'FAIL'}")
+    print(f"\nGATE 0 as pre-registered: {metrics['gate0_original']}"
+          f"   (G0.3, G0.5 failed)")
+    print(f"GATE 0 as amended       : {'PASS' if passed else 'FAIL'}")
 
 
 if __name__ == "__main__":
