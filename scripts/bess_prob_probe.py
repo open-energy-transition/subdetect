@@ -142,7 +142,7 @@ def main() -> None:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--aoi", default="gb_bess")
     ap.add_argument("--prob-dir", type=Path, default=None,
-                    help="default data/predictions_bess/<aoi>/prob_mean")
+                    help="default data/predictions_bess/<aoi>/prob")
     ap.add_argument("--run-name", default=None)
     ap.add_argument("--headline-only", action="store_true", default=True)
     ap.add_argument("--all-sizes", dest="headline_only", action="store_false")
@@ -150,7 +150,10 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     region = AOI_REGION[a.aoi]
     run = a.run_name or f"probe_{a.aoi}"
-    prob_dir = a.prob_dir or ROOT / "data" / "predictions_bess" / a.aoi / "prob_mean"
+    # `subdetect infer` writes <out_dir>/<aoi>/prob for a single checkpoint. The
+    # prob_mean name belongs to infer_fused_aoi.py, which writes four rasters per cell;
+    # v12_up2 is a single S2-only model, so there is nothing to fuse here.
+    prob_dir = a.prob_dir or ROOT / "data" / "predictions_bess" / a.aoi / "prob"
     if not prob_dir.exists():
         raise SystemExit(f"no prob rasters at {prob_dir}; run `subdetect infer --aoi {a.aoi} "
                          f"--upsample 2 --limit 80 --out-dir data/predictions_bess` first")
@@ -258,14 +261,24 @@ def main() -> None:
           f"{'YES' if g11 else 'no'}")
     print(f"  G1.2 WEAK  auc in [0.60,0.70) -> {'YES (rerun on sites with no substation within 300 m)' if g12 else 'no'}")
     print(f"  G1.3 buffer  spread {spread:.3f} -> "
-          f"{'FAIL: a pass here is a buffer artefact' if g13 else 'ok'}")
+          + ("exceeds 0.10, but there is no pass to downgrade" if g13 and not g11
+             else "FAIL: this pass is a buffer artefact" if g13 else "ok"))
     print(f"  G1.4 NULL  frac(p_max>=0.4) < 0.10 -> {'YES' if g14 else 'no'}"
           + ("  (expected; not evidence against feasibility given G1.P passed)"
              if g14 and g1p else ""))
+    # An AUC significantly BELOW 0.5 is not the pre-registered NULL and must not be
+    # reported as one: it means the two classes ARE separated, with batteries ranked below
+    # substations. The pre-registration (ff35af1) enumerated PASS / WEAK / NULL and did
+    # not anticipate this outcome, so it is named explicitly rather than folded into the
+    # else branch. It is necessary-but-not-sufficient for a battery detector: "does not
+    # look like a switchyard" is not the same claim as "is positively identifiable".
+    inverse = np.isfinite(ci_hi) and ci_hi < 0.50
     verdict = ("UNINFORMATIVE (positive control failed)" if not g1p else
                "FAIL (buffer artefact)" if g11 and g13 else
                "PASS: the production model already ranks BESS -- re-ranking is the cheap product"
                if g11 else "WEAK" if g12 else
+               "INVERSE: the classes separate, but batteries rank BELOW substations "
+               "(not the pre-registered NULL; unenumerated outcome)" if inverse else
                "NULL: expected, kills only the re-ranking route, not the study")
     print(f"\nVERDICT (Stage 1): {verdict}")
 
@@ -285,6 +298,7 @@ def main() -> None:
         "buffer_auc": json.dumps({str(k): (None if not np.isfinite(v) else round(v, 4))
                                   for k, v in aucs_by_buf.items()}),
         "buffer_spread": round(spread, 4),
+        "inverse_separation": bool(np.isfinite(ci_hi) and ci_hi < 0.50),
         "verdict": verdict,
         "generated": dt.datetime.now().isoformat(timespec="seconds"),
     }

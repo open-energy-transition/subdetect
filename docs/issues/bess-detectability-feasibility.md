@@ -337,9 +337,62 @@ median distance to the nearest one is 6.7 km — but only 37% find one inside th
 thickness of the control strata is fine; what fails is the specific same-cell
 operationalisation of the acquisition-confound control.
 
-### Stage 1 — production-detector probe
+### Stage 1 — production-detector probe (2026-09-02, GB, all 135 cells)
 
-Not yet run.
+**VERDICT: INVERSE — an outcome the pre-registration did not enumerate.** The two classes
+*do* separate, but batteries rank **below** substations. This is not the pre-registered
+NULL and is not reported as one.
+
+Ran `v12_up2_s2only` (`epoch=24-step=51000`, `--upsample 2`) over **all 135** GB cells, not
+the planned 80-cell subsample: inference measured 7 s/cell, so full coverage cost ~16 min
+and removes G1.0's subsample-bias concern outright rather than merely reporting it.
+**91 of 91** headline sites covered, `n_no_coverage` = 0.
+
+| gate | result | measured |
+|---|---|---|
+| G1.0 power | PASS | 91/91 sites covered, 0 uncovered |
+| **G1.P positive control** | **PASS** | 67 battery-free substations ≥20,000 m² covered, **55%** at `p_max` ≥ 0.4 (bar: ≥30 and ≥40%) |
+| G1.1 PASS | no | AUC 0.307, CI [0.236, 0.382], 15% at ≥0.4, battery-only 0.254 |
+| G1.2 WEAK | no | AUC not in [0.60, 0.70) |
+| G1.3 buffer | spread 0.112 | exceeds ±0.10, but there is no pass to downgrade |
+| G1.4 NULL | no | 15% at ≥0.4, above the 10% NULL definition |
+
+**G1.P passing is itself a result.** A Pakistan/India-trained TerraMind fine-tune, never
+shown a British scene, fires on **55%** of GB transmission substations ≥20,000 m² — against
+0.714 measured recall in its own domain. Domain transfer PK→GB works well enough that
+everything below is informative rather than a transfer artefact. This is exactly the guard
+the hydro probe lacked and had to pre-declare its way around.
+
+**The measured separation runs the wrong way.** Battery sites: median `p_max` **0.000**,
+15% reaching 0.4. Battery-free substations in the same rasters: 55% reaching 0.4. Rank AUC
+**0.307** with CI [0.236, 0.382] — the interval excludes 0.5, so this is a real separation,
+not noise, and it is *negative*: the substation detector systematically does **not** fire on
+battery yards while firing on comparable switchyards. Restricting to the battery-only
+sub-polygon pushes it further, to **0.254**.
+
+**G1.5 is the decisive table, and it is sharper than hydro's.**
+
+| | n | median `p_max` | max `p_max` | frac ≥ 0.4 |
+|---|---|---|---|---|
+| substation within 300 m | 66 | 0.000 | **1.000** | 0.212 |
+| no substation within 300 m | 25 | 0.000 | **0.180** | **0.000** |
+
+Every bit of response comes from the co-located switchyard. With one nearby, a site can
+saturate at 1.000; with none, the model never exceeds 0.18 and never once crosses 0.4. The
+hydro study measured 1.000 versus 0.41 for the same split; here the contrast is starker.
+The buffer sweep points the same way — AUC climbs 0.255 → 0.307 → 0.367 from 25 m to 150 m,
+i.e. the *larger* the buffer, the more substation-like a battery looks, because a wider
+footprint swallows more of the adjacent switchyard.
+
+**What this does and does not establish.** It establishes that battery yards do not look
+like switchyards to a model trained on switchyards, and it kills the cheap re-ranking route
+outright (re-ranking existing candidates would rank batteries last). It does **not**
+establish that batteries are positively identifiable: "does not look like a substation" is
+a weaker claim than "has a signature of its own", and a battery scoring 0.000 could equally
+mean it looks like unremarkable industrial ground. Only Tier 2, with a classifier trained
+on the battery class itself, can separate those two readings. Stage 1 has, however, made
+Tier 2 the interesting experiment rather than a formality: there is *something* different
+about these footprints at 10 m.
 
 ### Stage 2 — separability
 
