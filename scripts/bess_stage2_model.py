@@ -167,7 +167,16 @@ def main() -> None:
     d, feat = _prep(raw, ("site", "control"))
     # Static feature set = the headline. chg_* is held back for G2.3 and scored separately.
     static = [c for c in feat if group_of(c) != "change"]
+    n_before = len(d)
+    # how="any" matches the hydro script, but a single feature that is NaN in most rows
+    # (bright_ring_contrast and vv_contrast_max both can be) would silently wipe the
+    # sample. Report the per-feature NaN counts when the drop is severe rather than
+    # letting a 90% loss pass as a normal run.
     d = d.dropna(subset=static, how="any")
+    if len(d) < 0.7 * n_before:
+        nanc = raw[static].isna().sum().sort_values(ascending=False)
+        log.warning("dropna removed %d of %d rows; worst offenders:\n%s",
+                    n_before - len(d), n_before, nanc[nanc > 0].head(8).to_string())
     if d.empty:
         raise SystemExit("no complete feature rows")
     n_sites = d[d.label == 1].site_id.nunique()

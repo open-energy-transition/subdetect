@@ -105,17 +105,24 @@ CTRL_MAX_DIST_M = 40_000.0   # amendment A2: one S2 granule / one S1 look geomet
 
 
 def rank_auc(pos: np.ndarray, neg: np.ndarray) -> float:
-    """Mann-Whitney rank AUC. Same estimator as hydro_detectability.rank_auc."""
+    """Mann-Whitney rank AUC, TIES AVERAGED.
+
+    `hydro_detectability.rank_auc` ranks with `argsort`, which does not average ties, and
+    on a tied feature that is not a rounding difference: a perfectly constant feature comes
+    out as 0.000 rather than 0.500, because the positives land in whatever arbitrary order
+    argsort chose. Observed here on `valid_frac_s2`, which is exactly 1.0 in every cloud-
+    free GB cell. `hydro_prob_probe.rank_auc` uses scipy's tie-averaging rankdata; this
+    follows that one instead, which also matters for the balance table's [0.45, 0.55]
+    window on any feature with a discrete or saturated distribution.
+    """
     pos = np.asarray(pos, "float64")[np.isfinite(np.asarray(pos, "float64"))]
     neg = np.asarray(neg, "float64")[np.isfinite(np.asarray(neg, "float64"))]
     if pos.size == 0 or neg.size == 0:
         return float("nan")
-    sc = np.r_[pos, neg]
-    lab = np.r_[np.ones(len(pos)), np.zeros(len(neg))]
-    order = sc.argsort()
-    ranks = np.empty(len(sc))
-    ranks[order] = np.arange(len(sc))
-    return float((ranks[lab == 1].mean() - (lab.sum() - 1) / 2) / max((lab == 0).sum(), 1))
+    from scipy.stats import rankdata
+    r = rankdata(np.concatenate([pos, neg]))
+    return float((r[: pos.size].sum() - pos.size * (pos.size + 1) / 2)
+                 / (pos.size * neg.size))
 
 
 def smd(pos: np.ndarray, neg: np.ndarray) -> float:
@@ -152,6 +159,7 @@ class CellStack:
     def __init__(self, aoi: str, cell: str):
         d = COMPOSITES_ROOT / aoi / "composites" / cell
         self.aoi, self.cell, self.ok, self.has_pre = aoi, cell, False, False
+        self._cov = None
         s2p, s1p, demp = d / "composite_0.tif", d / "composite_s1.tif", d / "composite_dem.tif"
         if not (s2p.exists() and s1p.exists() and demp.exists()):
             return
@@ -179,10 +187,34 @@ class CellStack:
                 self.has_pre = True
         self.ok = True
 
+    def bounds_4326(self):
+        from shapely.geometry import box
+        b = rasterio.transform.array_bounds(self.shape[0], self.shape[1], self.transform)
+        return gpd.GeoSeries([box(*b)], crs=self.crs).to_crs("EPSG:4326").iloc[0]
+
+    def clip(self, gdf):
+        """Rows whose geometry could touch this cell, via the frame's spatial index.
+
+        Not an optimisation detail: GB alone has 1.24M road features, and `to_crs` on the
+        whole frame -- which is what rasterize() would otherwise do, once per site and
+        again per control -- makes Stage 2a computationally impossible. geopandas caches
+        `.sindex` on the frame, so the index is built once per layer per run.
+        """
+        if gdf is None or len(gdf) == 0:
+            return gdf
+        try:
+            hit = gdf.sindex.query(self.bounds_4326(), predicate="intersects")
+        except Exception:  # noqa: BLE001 -- fall back to the full frame rather than fail
+            return gdf
+        return gdf.iloc[hit]
+
     def rasterize(self, gdf) -> np.ndarray:
         if gdf is None or len(gdf) == 0:
             return np.zeros(self.shape, dtype=bool)
-        g = gdf.to_crs(self.crs)
+        g = self.clip(gdf)
+        if g is None or len(g) == 0:
+            return np.zeros(self.shape, dtype=bool)
+        g = g.to_crs(self.crs)
         g = g[~g.geometry.is_empty & g.geometry.notna()]
         if g.empty:
             return np.zeros(self.shape, dtype=bool)
@@ -198,6 +230,10 @@ class CellStack:
         return (ndimage.distance_transform_edt(~mask) * 10.0).astype("float32")
 
     def covariates(self, roads, lines, industrial, bess, power_all) -> dict:
+        # Per-cell context is fixed, but this is called once per site and once per
+        # control. Cache it: the distance transforms alone are ~1 s per layer per cell.
+        if getattr(self, "_cov", None) is not None:
+            return self._cov
         s2_frac = ndimage.uniform_filter(self.s2_valid.astype("float32"), 31)
         cov = {
             "elev_m": self.dem[0], "slope_deg": self.dem[1],
@@ -211,6 +247,7 @@ class CellStack:
             & (self.dist_m(self.rasterize(bess)) >= EXCLUDE_BESS_M)
             & (self.dist_m(self.rasterize(power_all)) >= EXCLUDE_POWER_M)
         )
+        self._cov = cov
         return cov
 
 
@@ -431,6 +468,14 @@ def main() -> None:
 
     ctx = {r: {k: _load(r, f"context_{k}") for k in ("roads", "lines", "industrial")}
            for r in regions}
+    # Built once per region, not once per site: `sites[sites.region == r]` inside the loop
+    # rebuilt these 259 times, and each rebuild invalidates the spatial index that clip()
+    # depends on.
+    reg_sites = {r: sites[sites.region == r].reset_index(drop=True) for r in regions}
+    reg_ctrls = {r: controls[controls.region == r].reset_index(drop=True) for r in regions}
+    reg_power = {r: gpd.GeoDataFrame(
+        pd.concat([reg_ctrls[r][["geometry"]], reg_sites[r][["geometry"]]],
+                  ignore_index=True), crs="EPSG:4326") for r in regions}
 
     rows: list[dict] = []
     stacks: dict[tuple, CellStack] = {}
@@ -454,9 +499,7 @@ def main() -> None:
             continue
         c = ctx[site.region]
         cov = st.covariates(c["roads"], c["lines"], c["industrial"],
-                            sites[sites.region == site.region],
-                            pd.concat([controls[controls.region == site.region],
-                                       sites[sites.region == site.region]], ignore_index=True))
+                            reg_sites[site.region], reg_power[site.region])
         site_gdf = gpd.GeoDataFrame(geometry=[site.geometry], crs="EPSG:4326")
         pmask = st.rasterize(site_gdf)
         if pmask.sum() < 3:
@@ -484,15 +527,16 @@ def main() -> None:
         # battery-only arm is scored against the identical control set. ALL substations
         # are subtracted, not just the eligible ones -- a substation excluded from the
         # control pool for being next to a battery is precisely the switchyard to remove.
-        allsub = controls[controls.region == site.region]
+        allsub = reg_ctrls[site.region]
         sub_mask = ndimage.binary_dilation(st.rasterize(allsub), iterations=3)
         bo_mask = pmask & ~sub_mask
+        bo_row = None
         if bo_mask.sum() * 100.0 >= 2000.0:
             bf = region_features(st, bo_mask)
             if bf is not None:
                 bf.update(context_features(cov, bo_mask))
-                rows.append({**base, "role": "site_bo",
-                             "battery_only_area_m2": float(bo_mask.sum() * 100.0), **bf})
+                bo_row = {**base, "role": "site_bo",
+                          "battery_only_area_m2": float(bo_mask.sum() * 100.0), **bf}
 
         got = []
         if a.tier == 1:
@@ -542,21 +586,24 @@ def main() -> None:
                     continue
                 cc2 = ctx[ctrl.region]
                 ccov = cst.covariates(cc2["roads"], cc2["lines"], cc2["industrial"],
-                                      sites[sites.region == ctrl.region],
-                                      controls[controls.region == ctrl.region])
+                                      reg_sites[ctrl.region], reg_power[ctrl.region])
                 cf.update(context_features(ccov, m))
                 if cf["valid_frac_s2"] < a.min_valid_frac:
                     continue
                 got.append({**base, "label": 0, "role": "control",
                             "ctrl_id": ctrl.ctrl_id, "ctrl_cell": ctrl.cell,
                             "ctrl_same_cell": bool(ctrl.cell == site.cell),
-                            "ctrl_dist_m": float(ctrl._d) if hasattr(ctrl, "_d") else np.nan,
+                            # .get, not attribute access: pandas blocks Series attribute
+                            # lookup for labels beginning with an underscore.
+                            "ctrl_dist_m": float(ctrl.get("_d", np.nan)),
                             **cf})
         if not got:
             stats["thin"] += 1
             continue
         rows.append({**base, **pf})
         rows.extend(got)
+        if bo_row is not None:
+            rows.append(bo_row)
         stats["done"] += 1
         if stats["done"] % 25 == 0:
             log.info("  %d sites matched (%d rows)", stats["done"], len(rows))
@@ -586,15 +633,23 @@ def main() -> None:
                     "pos_mean": float(np.nanmean(p_)), "neg_mean": float(np.nanmean(n_)),
                     "smd": smd(p_, n_), "auc": rank_auc(p_, n_)})
     balt = pd.DataFrame(bal)
-    balt["ok"] = (~balt.varies) | ((balt.smd.abs() <= 0.10)
-                                   & balt.auc.between(0.45, 0.55))
+    n_pos_rows, n_neg_rows = len(pos), len(neg)
+    enough = n_pos_rows >= MIN_SITES_FOR_FEATURE_AUC and n_neg_rows >= 10
+    balt["n_pos"], balt["n_neg"] = n_pos_rows, n_neg_rows
+    balt["ok"] = enough & ((~balt.varies) | ((balt.smd.abs() <= 0.10)
+                                             & balt.auc.between(0.45, 0.55)))
     balt.assign(run_name=a.run_name, tier=a.tier).to_csv(
         RESULTS / f"bess_balance_tier{a.tier}.csv", index=False)
 
     print(f"\n=== Tier {a.tier} covariate balance (READ THIS BEFORE ANY AUC) ===")
     print(balt.round(4).to_string(index=False))
     bad = balt[~balt.ok]
-    print(f"\nbalance: {'PASS' if bad.empty else 'FAIL on ' + ', '.join(bad.covariate)}")
+    if not enough:
+        print(f"\nbalance: INVALID -- {n_pos_rows} positive / {n_neg_rows} control rows is "
+              f"too few to judge (need >= {MIN_SITES_FOR_FEATURE_AUC} / 10). A constant "
+              "covariate on an empty sample is not balance.")
+    else:
+        print(f"\nbalance: {'PASS' if bad.empty else 'FAIL on ' + ', '.join(bad.covariate)}")
 
     skip = {"site_id", "region", "cell", "cell_0p5", "label", "role", "ctrl_id",
             "battery_only_area_m2",
