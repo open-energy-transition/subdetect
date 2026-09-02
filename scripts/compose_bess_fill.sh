@@ -31,7 +31,12 @@ for a in $AOIS; do
 done
 echo "pre-flight OK: ${free_gb} GB free, all three AOI symlinks resolve out of tree"
 
-for sensor in s2 s1 dem s2pre; do
+# s2pre is DEFERRED by default. It feeds only the bi-temporal change group, which is the
+# single pre-declared G2.3 extension -- read only if Tier 2 lands in the 0.65-0.75 dead
+# band. It costs a second full S2 pass (measured 38 s/cell over 389 cells, so ~4 h), and
+# buying conditional data before knowing whether the condition holds is speculative.
+# Run `SENSORS=s2pre scripts/compose_bess_fill.sh` if and when the dead band is hit.
+for sensor in ${SENSORS:-s2 s1 dem}; do
   for a in $AOIS; do
     r=${a%%_bess}
     cells="data/bess_cells_${r}.txt"
