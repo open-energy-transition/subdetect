@@ -394,38 +394,41 @@ on the battery class itself, can separate those two readings. Stage 1 has, howev
 Tier 2 the interesting experiment rather than a formality: there is *something* different
 about these footprints at 10 m.
 
-#### Replication in California (2026-09-02, all 124 cells)
+#### All three regions (2026-09-02/03, all 389 cells)
 
-The GB result **replicates independently, and more strongly**, in a region where sites are
-2.7× larger (median 45,000 m² vs 17,000 m²) and 37% are solar hybrids.
+The GB result **does not replicate uniformly**, and the way it fails is the finding.
 
-| | GB | California |
-|---|---|---|
-| sites covered | 91 / 91 | 86 / 86 |
-| **G1.P** substations ≥20k firing | **55%** (n=67) | **85%** (n=67) |
-| battery AUC vs those substations | 0.307 [0.236, 0.382] | **0.248 [0.179, 0.327]** |
-| battery-only sub-polygon AUC | 0.254 | **0.209** |
-| buffer sweep spread | 0.112 (fails G1.3) | **0.035 (passes G1.3)** |
-| sites at `p_max` ≥ 0.4 | 15% | 44% |
+| region | co-located ≤300 m | overlaps a substation | median site | G1.P | sites at ≥0.4 | **AUC** | CI | battery-only AUC | Δ |
+|---|---|---|---|---|---|---|---|---|---|
+| GB | 73% | 31% | 32,438 m² | 55% | 15% | **0.307** | [0.236, 0.383] | 0.254 | **−0.053** |
+| CA | 71% | 44% | 59,981 m² | 85% | 44% | **0.248** | [0.179, 0.327] | 0.209 | **−0.039** |
+| TX | **93%** | **63%** | 39,027 m² | 72% | 67% | **0.483** | [0.395, 0.576] | 0.418 | **−0.065** |
 
-Both CIs exclude 0.5, in the same direction, from independent label sets and independent
-imagery. In California the result is additionally **buffer-robust** — spread 0.035 against
-G1.3's ±0.10 — which the GB run was not, so the inverse separation is not a footprint
-artefact.
+GB and CA give an inverse separation with CIs excluding 0.5. **Texas does not**: its CI
+straddles 0.5, and 67% of its battery sites fire at `p_max` ≥ 0.4 — the model cannot tell a
+Texan battery from a Texan substation. That is a third distinct outcome, and it is not the
+pre-registered NULL either, which meant *silence* (`frac ≥ 0.4` under 10%). The script now
+names PASS / WEAK / INVERSE / NULL / NO SEPARATION separately rather than collapsing the
+last three.
 
-**The transfer number is worth noting on its own.** 85% of Californian transmission
-substations ≥20,000 m² fire at `p_max` ≥ 0.4 under a model trained only on Pakistan and
-NW India — above its 0.714 measured recall in its own domain. Whatever else is true, this
-checkpoint generalises to US and UK transmission infrastructure far better than the project
-has ever had cause to test.
+**Co-location explains the spread.** Texas is the region where batteries are most
+thoroughly inside substations — 93% within 300 m and **63% physically overlapping**, against
+31–44% overlap in GB and CA. Where the battery polygon *contains* a switchyard, the model
+fires on the switchyard and `p_max` saturates: TX median `p_max` is 0.996. So the headline
+AUC does not measure batteries at all in Texas; it measures how often a battery label
+happens to enclose a substation.
 
-**One correction to the GB reading.** "Batteries are invisible to the substation model" is
-too strong. In California 44% of battery sites reach `p_max` ≥ 0.4, and among the 25 sites
-with *no* substation within 300 m, 20% still do and one saturates at 1.000 — where in GB
-that subset never once crossed 0.4 and peaked at 0.180. The defensible claim is the
-comparative one: batteries score **systematically and significantly lower** than
-area-comparable switchyards, in both regions. Some large Californian battery yards are
-detected outright; they are simply detected less reliably than substations are.
+**What does replicate, in all three regions, is the mechanism.** Subtracting the overlapping
+substation *always* lowers the score — **−0.053, −0.039, −0.065**, in three independent
+regions with different label sets, different imagery and opposite headline verdicts. The
+response this model gives a battery site is driven by the switchyard inside it, not by the
+battery.
+
+The corollary is a warning for Stage 2, and it is sharper in Texas than anywhere: where 63%
+of positives overlap a substation, a "battery vs battery-free substation" comparison is
+partly a comparison of substations with substations. The G2.4-T2 battery-only arm is not a
+supplementary check here — it is the only version of the question that is clean, and the
+Tier-2 headline must be read next to it in every region.
 
 ### Stage 2 — separability
 

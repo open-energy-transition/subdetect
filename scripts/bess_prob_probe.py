@@ -272,14 +272,25 @@ def main() -> None:
     # not anticipate this outcome, so it is named explicitly rather than folded into the
     # else branch. It is necessary-but-not-sufficient for a battery detector: "does not
     # look like a switchyard" is not the same claim as "is positively identifiable".
+    # Three distinct outcomes live below 0.70, and collapsing them into "NULL" misreports
+    # two of them. The pre-registered G1.4 NULL means the model is SILENT on batteries
+    # (frac >= 0.4 under 10%). It is not the same as an inverse separation, and it is not
+    # the same as the model firing on batteries and substations alike and being unable to
+    # tell them apart -- which is what a CI straddling 0.5 with a high firing rate means.
     inverse = np.isfinite(ci_hi) and ci_hi < 0.50
+    straddles = np.isfinite(ci_lo) and np.isfinite(ci_hi) and ci_lo < 0.50 < ci_hi
     verdict = ("UNINFORMATIVE (positive control failed)" if not g1p else
                "FAIL (buffer artefact)" if g11 and g13 else
                "PASS: the production model already ranks BESS -- re-ranking is the cheap product"
                if g11 else "WEAK" if g12 else
                "INVERSE: the classes separate, but batteries rank BELOW substations "
                "(not the pre-registered NULL; unenumerated outcome)" if inverse else
-               "NULL: expected, kills only the re-ranking route, not the study")
+               "NULL: silent on batteries, as pre-registered -- kills only the re-ranking "
+               "route" if g14 else
+               "NO SEPARATION: the model fires on batteries and substations alike and "
+               f"cannot tell them apart ({frac04:.0%} of sites at p_max>=0.4; CI straddles "
+               "0.5). Not the pre-registered NULL, which meant silence." if straddles else
+               "INDETERMINATE")
     print(f"\nVERDICT (Stage 1): {verdict}")
 
     RESULTS.mkdir(parents=True, exist_ok=True)
@@ -306,7 +317,7 @@ def main() -> None:
         "buffer_auc": json.dumps({str(k): (None if not np.isfinite(v) else round(v, 4))
                                   for k, v in aucs_by_buf.items()}),
         "buffer_spread": round(spread, 4),
-        "inverse_separation": bool(np.isfinite(ci_hi) and ci_hi < 0.50),
+        "inverse_separation": bool(inverse), "ci_straddles_half": bool(straddles),
         "verdict": verdict,
         "generated": dt.datetime.now().isoformat(timespec="seconds"),
     }
