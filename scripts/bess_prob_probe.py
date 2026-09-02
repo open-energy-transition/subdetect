@@ -283,8 +283,16 @@ def main() -> None:
     print(f"\nVERDICT (Stage 1): {verdict}")
 
     RESULTS.mkdir(parents=True, exist_ok=True)
-    site_probs.assign(run_name=run, aoi=a.aoi, eval_version=EVAL_VERSION).to_csv(
-        RESULTS / "bess_prob_probe.csv", index=False)
+    # Append-and-dedup on (run_name, aoi), like every other results CSV in this study.
+    # A plain overwrite here would silently discard the previous region's per-site rows
+    # the moment a second region was probed.
+    sp = RESULTS / "bess_prob_probe.csv"
+    rows_out = site_probs.assign(run_name=run, aoi=a.aoi, eval_version=EVAL_VERSION)
+    if sp.exists():
+        prev = pd.read_csv(sp)
+        prev = prev[~((prev.run_name == run) & (prev.aoi == a.aoi))]
+        rows_out = pd.concat([prev, rows_out], ignore_index=True)
+    rows_out.to_csv(sp, index=False)
     summ = {
         "run_name": run, "aoi": a.aoi, "eval_version": EVAL_VERSION,
         "n_rasters": len(rindex), "n_sites_covered": n_cov, "n_no_coverage": n_nocov,
