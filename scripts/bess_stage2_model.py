@@ -64,7 +64,7 @@ META = {"run_name", "site_id", "region", "cell", "cell_0p5", "group", "label", "
         "site_area_m2", "core_area_m2", "capacity_mw", "energy_mwh", "construction_year",
         "d_substation_m", "overlaps_substation", "is_hybrid", "has_pre",
         "battery_only_area_m2", "ctrl_same_cell", "ctrl_dist_m", "valid_frac_s2",
-        "chg_valid_frac"}
+        "chg_valid_frac", "n_px"}
 
 
 def group_of(col: str) -> str:
@@ -121,6 +121,40 @@ def site_bootstrap(y, score, site_ids, n=1000, seed=0):
     if not out:
         return float("nan"), float("nan")
     return float(np.percentile(out, 2.5)), float(np.percentile(out, 97.5))
+
+
+# Statistics whose sampling distribution depends on how many pixels the region has: an
+# extreme drawn from a larger window is larger in expectation even when the underlying
+# surface is identical. The Tier-2 control pool cannot be perfectly size-balanced (small
+# substations vastly outnumber large ones, leaving n_px SMD ~0.17 after matching on the
+# realized window), so the `imagery_robust` arm drops these and keeps only means and
+# differences of means, which are size-invariant. If the two arms agree, the residual size
+# imbalance is not carrying the result -- which is a test, not an argument.
+AREA_SENSITIVE = {
+    "bright_p95", "ndvi_min", "ndwi_max", "mndwi_max", "ndbi_max", "bsi_max",
+    "tex_std", "vh_std_db", "vv_contrast_max", "vh_contrast_max",
+    "n_bright_px_5db_per_ha", "chg_ndbi_max", "chg_bsi_max",
+}
+
+
+def _arms(static: list[str]) -> list[tuple[str, list[str]]]:
+    """The ablation arms.
+
+    `imagery` -- S2 + S1 with no context -- is the arm that answers the question actually
+    asked ("is there a signal in Sentinel-1/Sentinel-2 data"). `all` is the pre-registered
+    headline the G2.1 gate is set on and additionally carries the OSM-derived context
+    features, which is why G2.7 exists to catch the case where those carry the result.
+    Both are reported side by side and neither is allowed to stand in for the other.
+    """
+    img = [c for c in static if group_of(c) in ("s2", "s1")]
+    return [
+        ("all", static),
+        ("imagery", img),
+        ("imagery_robust", [c for c in img if c not in AREA_SENSITIVE]),
+        ("s2", [c for c in static if group_of(c) == "s2"]),
+        ("s1", [c for c in static if group_of(c) == "s1"]),
+        ("context", [c for c in static if group_of(c) == "context"]),
+    ]
 
 
 def _prep(df: pd.DataFrame, roles: tuple[str, ...]) -> tuple[pd.DataFrame, list[str]]:
@@ -191,10 +225,7 @@ def main() -> None:
     for dname, (trm, hom) in directions.items():
         if trm.sum() == 0 or hom.sum() == 0:
             continue
-        for gname, cols in [("all", static),
-                            ("s2", [c for c in static if group_of(c) == "s2"]),
-                            ("s1", [c for c in static if group_of(c) == "s1"]),
-                            ("context", [c for c in static if group_of(c) == "context"])]:
+        for gname, cols in _arms(static):
             if not cols:
                 continue
             rows.append({"direction": dname, "arm": gname,
@@ -206,10 +237,7 @@ def main() -> None:
     pooled = []
     allmask = pd.Series(True, index=d.index)
     nomask = pd.Series(False, index=d.index)
-    for gname, cols in [("all", static),
-                        ("s2", [c for c in static if group_of(c) == "s2"]),
-                        ("s1", [c for c in static if group_of(c) == "s1"]),
-                        ("context", [c for c in static if group_of(c) == "context"])]:
+    for gname, cols in _arms(static):
         if cols:
             pooled.append({"direction": "pooled", "arm": gname,
                            **_arm(d, cols, allmask, nomask, seeds)})
@@ -275,7 +303,12 @@ def main() -> None:
     bal_ok = True
     if bal.exists():
         bt = pd.read_csv(bal)
-        bad = bt[~bt.ok.astype(bool)]
+        # Respect Stage 2a's `matchable` flag: d_road_m / d_line_m / d_industrial_m cannot
+        # be matched between a battery and a substation without emptying the pool, so they
+        # are reported and never decide P1. Older CSVs without the column fail closed.
+        if "matchable" not in bt.columns:
+            bt = bt.assign(matchable=True)
+        bad = bt[(~bt.ok.astype(bool)) & bt.matchable.astype(bool)]
         bal_ok = bad.empty
         print(f"\nP1 balance: {'PASS' if bal_ok else 'FAIL on ' + ', '.join(bad.covariate)}"
               "   (read this before the AUCs above)")

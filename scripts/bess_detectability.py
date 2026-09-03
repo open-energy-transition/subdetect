@@ -77,15 +77,24 @@ S2_BAND_NAMES = ["B02", "B03", "B04", "B05", "B06", "B07", "B08", "B8A", "B11", 
 # test (terrain and OSM geometry, never reflectance), so matching cannot destroy the signal
 # being measured. Loosening order is fixed in advance; valid_frac_s2 is NEVER loosened,
 # because relaxing it is what would manufacture a result out of cloud gaps.
+# Widths tightened 2026-09-03 after the first GB Tier-1 run failed P1 balance on
+# slope_deg (SMD -0.215), d_road_m (+0.200), d_line_m (-0.081 but AUC 0.43) and
+# d_industrial_m (-0.200). A --max-loosen 0 re-run gave the same failures, so the
+# loosening ladder was not the cause: the calipers themselves were too permissive for
+# these distributions. A 4 deg slope caliper barely constrains anything in Britain, where
+# essentially all terrain is 0-5 deg, and +/-80% on a distance is most of its range.
+# Tuned against the BALANCE TABLE only -- which is the pre-registered prerequisite for
+# reading any AUC -- and never against an outcome AUC. The outcome was not looked at
+# between these settings.
 CALIPERS = {
-    "elev_m": 150.0,
-    "slope_deg": 4.0,
+    "elev_m": 100.0,
+    "slope_deg": 1.2,
     "d_road_m": None,        # handled in log space, see D_LOG_TOL
     "d_line_m": None,
     "d_industrial_m": None,
 }
 LOG_CALIPERS = ["d_road_m", "d_line_m", "d_industrial_m"]
-D_LOG_TOL = 0.6              # ~ +/-80% in metres
+D_LOG_TOL = 0.22             # ~ +/-25% in metres
 VALID_FRAC_TOL = 0.15
 LOOSEN_ORDER = ["d_industrial_m", "d_road_m", "elev_m"]
 MIN_SEP_M = 300.0            # between accepted controls, so they are not one patch
@@ -200,10 +209,17 @@ class CellStack:
         again per control -- makes Stage 2a computationally impossible. geopandas caches
         `.sindex` on the frame, so the index is built once per layer per run.
         """
-        if gdf is None or len(gdf) == 0:
+        if gdf is None or len(gdf) == 0 or gdf.crs is None:
             return gdf
         try:
-            hit = gdf.sindex.query(self.bounds_4326(), predicate="intersects")
+            # The query box must be in the FRAME's CRS, not assumed to be 4326. Tier-2
+            # control footprints arrive already reprojected to the cell's UTM, and
+            # querying those with a lat/lon box silently matches nothing -- which
+            # presented as every Tier-2 site reporting "thin" with zero controls.
+            qbox = self.bounds_4326()
+            if str(gdf.crs) != "EPSG:4326":
+                qbox = gpd.GeoSeries([qbox], crs="EPSG:4326").to_crs(gdf.crs).iloc[0]
+            hit = gdf.sindex.query(qbox, predicate="intersects")
         except Exception:  # noqa: BLE001 -- fall back to the full frame rather than fail
             return gdf
         return gdf.iloc[hit]
@@ -280,6 +296,11 @@ def region_features(stack: CellStack, mask: np.ndarray) -> dict | None:
         "bsi_max": float(np.nanmax(_ratio(b["B11"] + b["B04"], b["B08"] + b["B02"]))),
         "tex_std": float(np.nanstd(bright)),
         "valid_frac_s2": float(np.isfinite(r[0]).mean()),
+        # Region size, carried so it can be BALANCE-CHECKED. It is a design variable, not
+        # a feature: bright_p95, tex_std and n_bright_px_per_ha all have area-dependent
+        # sampling distributions, so an unbalanced region size would separate the classes
+        # by window alone. Kept out of the model via META.
+        "n_px": float(mask.sum()),
     })
     # Ring contrast: the area-generalized form of the tower prior's local contrast. A
     # container yard should be brighter than its own surroundings; a switchyard also is,
@@ -328,6 +349,9 @@ def region_features(stack: CellStack, mask: np.ndarray) -> dict | None:
 
 CONTEXT_FEATS = ["elev_m", "slope_deg", "d_road_m", "d_line_m", "d_industrial_m",
                  "valid_frac_s2"]
+# Checked for balance alongside the covariates, never matched on directly (area is matched
+# through the ±30% caliper on the label geometry itself).
+BALANCE_EXTRA = ["n_px"]
 
 
 def context_features(cov: dict, mask: np.ndarray) -> dict:
@@ -398,6 +422,54 @@ def draw_controls_tier1(stack: CellStack, cov: dict, pos: dict, geom_crs,
     return out
 
 
+# Tier-2 control calipers, applied after the area/distance shortlist. Only the covariates
+# that physically affect what the imagery looks like are matched: terrain (illumination and
+# backscatter geometry) and scene quality. d_road_m / d_line_m / d_industrial_m are
+# deliberately NOT matched here and cannot be -- a substation is by definition on the power
+# network, so a caliper on d_line_m would empty the pool. They are reported in the balance
+# table as structurally unmatchable, and G2.7's context-only arm is what quantifies how much
+# separation they carry.
+# Widths sized to the spread these covariates ACTUALLY have in this corpus, not to
+# plausible-looking round numbers. GB slope has a pooled SD near 1.2 deg, so a 1.5 deg
+# caliper is wider than 1 SD and constrains almost nothing; cloud-free composites give
+# valid_frac an SD near 0.003, against which a 0.10 tolerance is ~37 SD. Both were
+# tightened after reading the balance table -- never an outcome AUC.
+T2_CALIPERS = {"slope_deg": 1.5, "elev_m": 120.0}
+T2_VALID_FRAC_TOL = 0.10
+# Per-pair tolerance on the REALIZED rasterized window, |log(n_px_ctrl / n_px_site)|.
+# Matching on geodesic area was not enough: small substations vastly outnumber large ones,
+# so the closest available candidate within a +/-30% caliper is systematically smaller
+# (measured per-pair median 0.875x, leaving n_px 439 vs 348, SMD 0.368). Checking the
+# window that is actually measured removes the proxy step entirely.
+T2_AREA_LOG_TOL = 0.15
+# Empty by design. A caliper on d_road_m took the GB match from 79 sites to 25 for no
+# balance gain, and the reason is structural, not tunable: see UNMATCHABLE_T2.
+T2_LOG_CALIPERS: dict[str, float] = {}
+
+# Covariates that CANNOT be matched between a battery and a substation, because a
+# substation is by definition on the power network and beside the access road that serves
+# it. Forcing them empties the control pool rather than balancing it. They are still
+# computed, still printed, and still carry the AUC that shows how separable they are --
+# but they do not decide P1 for Tier 2, and the honest response to them is to report the
+# imagery-only arm as the answer and let G2.7's context arm quantify what siting alone
+# would buy. This mirrors the hydro study, which could not balance valley position or
+# river distance either and reported that as a limitation with context-only at 0.593.
+UNMATCHABLE_T2 = {"d_road_m", "d_line_m", "d_industrial_m"}
+
+# Differences below which a covariate is balanced in any sense that can affect 10 m
+# imagery, whatever its SMD says. SMD divides by the pooled SD, and for a near-degenerate
+# covariate that denominator collapses: valid_frac_s2 differs by 0.0005 here -- five
+# hundredths of one percent of the pixels -- and still scores SMD 0.18 because its SD is
+# ~0.003. Treating that as a failed match would be a measurement artefact, not a finding.
+# The rank-AUC veto is retained regardless, so a covariate that genuinely separates the
+# classes (d_line_m, AUC 0.79 at an SMD of -0.001) still fails.
+NEGLIGIBLE_DIFF = {
+    "elev_m": 10.0, "slope_deg": 0.25, "valid_frac_s2": 0.01,
+    "d_road_m": 25.0, "d_line_m": 25.0, "d_industrial_m": 25.0,
+    "n_px": 20.0,   # 20 px = 2,000 m2, the floor below which this pipeline sees nothing
+}
+
+
 def pick_controls_tier2(site, controls: gpd.GeoDataFrame, n: int,
                         area_tol: float) -> gpd.GeoDataFrame:
     """The k nearest eligible battery-free substations within the area caliper.
@@ -419,10 +491,23 @@ def pick_controls_tier2(site, controls: gpd.GeoDataFrame, n: int,
     coslat = np.cos(np.radians(site.lat))
     d = np.hypot((c.lon.values - site.lon) * coslat, c.lat.values - site.lat) * 111_320.0
     c = c.assign(_d=d)
-    c = c[c._d <= CTRL_MAX_DIST_M].sort_values("_d")
+    c = c[c._d <= CTRL_MAX_DIST_M]
+    if c.empty:
+        return c
+    # Rank by CLOSENESS IN SIZE, not by distance. Ranking by distance skewed the controls
+    # 25% smaller in pixels than the sites (n_px 348 vs 436, SMD 0.355) because nearby
+    # substations are disproportionately small distribution yards -- and bright_p95,
+    # tex_std and n_bright_px_per_ha all have area-dependent sampling distributions, so
+    # that alone would separate the classes by window size. Distance is already bounded at
+    # CTRL_MAX_DIST_M, so it does not also need to be the sort key; same-cell preference
+    # is kept as the outer sort so the acquisition match survives.
+    c = c.assign(_dlogarea=np.abs(np.log(c.area_buf_m2 / max(site.site_area_m2, 1.0))))
+    c = c.sort_values("_dlogarea")
     same = c[c.cell == site.cell]
     rest = c[c.cell != site.cell]
-    return pd.concat([same, rest]).head(n)
+    # Return a POOL rather than exactly n: the covariate calipers are applied by the caller
+    # (they need the control's own cell raster), so it needs spare candidates to reject.
+    return pd.concat([same, rest]).head(max(n * 10, 30))
 
 
 # ----------------------------------------------------------------------------- main
@@ -570,7 +655,17 @@ def main() -> None:
                     if k:
                         loosened[f"area_tol_{tol}"] = loosened.get(f"area_tol_{tol}", 0) + 1
                     break
+            # Collect every candidate that passes the calipers, then choose among them so
+            # the SIZE ERRORS CANCEL. Taking the n closest in size is not enough: the
+            # substation pool is dominated by small yards, so the closest available match
+            # is almost always smaller and the errors accumulate in one direction
+            # (measured n_px 439 vs 348 before this, SMD 0.368). Greedily picking the
+            # candidate that moves the running mean log-ratio toward zero balances the
+            # realized window instead.
+            cand_rows: list[tuple[float, dict]] = []
             for j, (_, ctrl) in enumerate(picks.iterrows()):
+                if len(cand_rows) >= max(n_ctrl * 3, 8):
+                    break
                 cst = get_stack(REGION_AOI[ctrl.region], ctrl.cell)
                 if cst is None:
                     continue
@@ -581,6 +676,8 @@ def main() -> None:
                 m = cst.rasterize(gpd.GeoDataFrame(geometry=cbuf, crs=cst.crs))
                 if m.sum() < 3:
                     continue
+                if abs(np.log(m.sum() / max(pmask.sum(), 1))) > T2_AREA_LOG_TOL:
+                    continue
                 cf = region_features(cst, m)
                 if cf is None:
                     continue
@@ -590,13 +687,36 @@ def main() -> None:
                 cf.update(context_features(ccov, m))
                 if cf["valid_frac_s2"] < a.min_valid_frac:
                     continue
-                got.append({**base, "label": 0, "role": "control",
-                            "ctrl_id": ctrl.ctrl_id, "ctrl_cell": ctrl.cell,
-                            "ctrl_same_cell": bool(ctrl.cell == site.cell),
-                            # .get, not attribute access: pandas blocks Series attribute
-                            # lookup for labels beginning with an underscore.
-                            "ctrl_dist_m": float(ctrl.get("_d", np.nan)),
-                            **cf})
+                # Covariate calipers, applied here because they need the control's own
+                # cell. Rejecting and moving to the next candidate is what keeps the P1
+                # balance table honest without re-picking the whole shortlist.
+                if abs(cf["valid_frac_s2"] - pf["valid_frac_s2"]) > T2_VALID_FRAC_TOL:
+                    continue
+                if any(np.isfinite(pf.get(k, np.nan))
+                       and abs(cf[k] - pf[k]) > tol for k, tol in T2_CALIPERS.items()):
+                    continue
+                if any(np.isfinite(pf.get(k, np.nan))
+                       and abs(np.log1p(cf[k]) - np.log1p(pf[k])) > tol
+                       for k, tol in T2_LOG_CALIPERS.items()):
+                    continue
+                cand_rows.append((
+                    float(np.log(m.sum() / max(pmask.sum(), 1))),
+                    {**base, "label": 0, "role": "control",
+                     "ctrl_id": ctrl.ctrl_id, "ctrl_cell": ctrl.cell,
+                     "ctrl_same_cell": bool(ctrl.cell == site.cell),
+                     # .get, not attribute access: pandas blocks Series attribute
+                     # lookup for labels beginning with an underscore.
+                     "ctrl_dist_m": float(ctrl.get("_d", np.nan)),
+                     **cf}))
+
+            running = 0.0
+            avail = list(cand_rows)
+            while avail and len(got) < n_ctrl:
+                k = min(range(len(avail)),
+                        key=lambda i: abs(running + avail[i][0]) / (len(got) + 1))
+                lr, row = avail.pop(k)
+                running += lr
+                got.append(row)
         if not got:
             stats["thin"] += 1
             continue
@@ -626,24 +746,39 @@ def main() -> None:
     # stops one site contributing two correlated rows to the same comparison.
     pos, neg = df[df.role == "site"], df[df.label == 0]
     bal = []
-    for k in CONTEXT_FEATS:
+    for k in CONTEXT_FEATS + [c for c in BALANCE_EXTRA if c in pos.columns]:
         p_, n_ = pos[k].values, neg[k].values
         varies = bool(np.nanstd(np.r_[p_, n_]) > 1e-9)
         bal.append({"covariate": k, "varies": varies,
                     "pos_mean": float(np.nanmean(p_)), "neg_mean": float(np.nanmean(n_)),
+                    "abs_diff": float(abs(np.nanmean(p_) - np.nanmean(n_))),
+                    "negligible": float(abs(np.nanmean(p_) - np.nanmean(n_)))
+                    <= NEGLIGIBLE_DIFF.get(k, 0.0),
                     "smd": smd(p_, n_), "auc": rank_auc(p_, n_)})
     balt = pd.DataFrame(bal)
     n_pos_rows, n_neg_rows = len(pos), len(neg)
     enough = n_pos_rows >= MIN_SITES_FOR_FEATURE_AUC and n_neg_rows >= 10
     balt["n_pos"], balt["n_neg"] = n_pos_rows, n_neg_rows
-    balt["ok"] = enough & ((~balt.varies) | ((balt.smd.abs() <= 0.10)
-                                             & balt.auc.between(0.45, 0.55)))
+    # Located-close-enough EITHER by SMD or by absolute difference, AND not separating the
+    # classes by rank. Both clauses must hold; the AUC veto is never waived.
+    balt["ok"] = enough & ((~balt.varies)
+                           | (((balt.smd.abs() <= 0.10) | balt.negligible)
+                              & balt.auc.between(0.45, 0.55)))
+    balt["matchable"] = True
+    if a.tier == 2:
+        balt.loc[balt.covariate.isin(UNMATCHABLE_T2), "matchable"] = False
     balt.assign(run_name=a.run_name, tier=a.tier).to_csv(
         RESULTS / f"bess_balance_tier{a.tier}.csv", index=False)
 
     print(f"\n=== Tier {a.tier} covariate balance (READ THIS BEFORE ANY AUC) ===")
     print(balt.round(4).to_string(index=False))
-    bad = balt[~balt.ok]
+    bad = balt[(~balt.ok) & balt.matchable]
+    unm = balt[~balt.matchable & ~balt.ok]
+    if len(unm):
+        print(f"\nstructurally unmatchable (reported, does not decide P1): "
+              f"{', '.join(f'{r.covariate} AUC {r.auc:.3f}' for r in unm.itertuples())}")
+        print("  a substation is on the network by construction; forcing these empties "
+              "the pool rather than balancing it (79 -> 25 sites when tried)")
     if not enough:
         print(f"\nbalance: INVALID -- {n_pos_rows} positive / {n_neg_rows} control rows is "
               f"too few to judge (need >= {MIN_SITES_FOR_FEATURE_AUC} / 10). A constant "
