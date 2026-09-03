@@ -105,6 +105,10 @@ MIN_SITES_FOR_FEATURE_AUC = 10
 EXCLUDE_BESS_M = 500.0
 EXCLUDE_POWER_M = 300.0
 
+# Distances are clipped here. See CellStack.dist_m for why an unclipped sentinel is worse
+# than useless as both a covariate and a feature.
+DIST_CLIP_M = 5000.0
+
 # Tier-2 area caliper, loosened in this fixed order if the strata come out thin.
 AREA_TOL_ORDER = [0.30, 0.50, 1.00]
 CTRL_MAX_DIST_M = 40_000.0   # amendment A2: one S2 granule / one S1 look geometry
@@ -241,9 +245,19 @@ class CellStack:
             fill=0, all_touched=False, dtype="uint8").astype(bool)
 
     def dist_m(self, mask: np.ndarray) -> np.ndarray:
+        """Distance to the nearest set pixel, in metres, CLIPPED at DIST_CLIP_M.
+
+        The clip matters. An empty mask -- a cell with no mapped industrial landuse, say --
+        previously returned a 1e6 sentinel, and a sentinel is not a distance: it dragged
+        the control mean for d_industrial_m to 78 km, made the balance table meaningless,
+        and handed the model a feature whose scale was set by whether a layer happened to
+        be mapped in that cell at all. Beyond a few kilometres the distinction between
+        "far" and "farther" carries nothing for a 10 m footprint anyway.
+        """
         if not mask.any():
-            return np.full(self.shape, 1e6, dtype="float32")
-        return (ndimage.distance_transform_edt(~mask) * 10.0).astype("float32")
+            return np.full(self.shape, DIST_CLIP_M, dtype="float32")
+        d = ndimage.distance_transform_edt(~mask) * 10.0
+        return np.minimum(d, DIST_CLIP_M).astype("float32")
 
     def covariates(self, roads, lines, industrial, bess, power_all) -> dict:
         # Per-cell context is fixed, but this is called once per site and once per
@@ -537,7 +551,10 @@ def main() -> None:
     a = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     rng = np.random.default_rng(a.seed)
-    n_ctrl = a.n_controls or (8 if a.tier == 1 else 3)
+    # Tier-2 default raised 3 -> 5 because the pre-registered G2.0-T2 minimum of 270
+    # controls was missed at 3 (232 drawn across 138 sites, since the calipers reject
+    # most candidates). This is a sampling parameter, not a threshold.
+    n_ctrl = a.n_controls or (8 if a.tier == 1 else 5)
     regions = [r.strip() for r in a.regions.split(",")]
 
     sites = pd.concat([s for s in (_load(r, "bess_sites") for r in regions) if s is not None],

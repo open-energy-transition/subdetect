@@ -196,11 +196,17 @@ def fig_tiers(summ: pd.DataFrame) -> None:
     if p.empty:
         print("skip bess_tiers.png: no pooled rows yet")
         return
-    arms = ["all", "s2", "s1", "context"]
-    fig, ax = plt.subplots(figsize=(8.6, 4.4))
+    arms = ["all", "imagery", "s2", "s1", "context"]
+    fig, ax = plt.subplots(figsize=(10.0, 4.6), layout="constrained")
     x = np.arange(len(arms))
-    for k, (tier, col, lab) in enumerate([(1, AQUA, "Tier 1 — vs generic land (upper bound)"),
-                                          (2, BLUE, "Tier 2 — vs battery-free substations (the answer)")]):
+    # Tier 1 is NOT labelled an upper bound. It was designed as one and did not behave
+    # like one: its controls are matched on road/line/industrial distance, which forces
+    # them to be infrastructure-adjacent land rather than open countryside, and it came in
+    # BELOW Tier 2. Calling it an upper bound in the figure would repeat a claim the data
+    # contradicted.
+    for k, (tier, col, lab) in enumerate(
+            [(1, AQUA, "Tier 1 — vs matched infrastructure-adjacent land"),
+             (2, BLUE, "Tier 2 — vs matched battery-free substations (the answer)")]):
         t = p[p.tier == tier]
         if t.empty:
             continue
@@ -221,7 +227,8 @@ def fig_tiers(summ: pd.DataFrame) -> None:
     ax.axhline(0.75, color=CRITICAL, linewidth=1.3, linestyle="--", zorder=2)
     ax.text(len(arms) - 0.4, 0.757, "G2.1-T2 bar 0.75", color=CRITICAL, fontsize=8.5)
     ax.axhline(0.50, color=MUTED, linewidth=1.0, zorder=2)
-    ax.set_xticks(x, ["all", "S2 only", "S1 only", "context only"])
+    ax.set_xticks(x, ["all\n(32 feat)", "imagery only\nS2+S1", "S2 only", "S1 only",
+                      "context only\n(no imagery)"])
     ax.set_ylim(0.4, 1.0)
     ax.set_ylabel("grouped-CV AUC")
     ax.set_title("Battery-specific signal, or just the switchyard?")
@@ -291,11 +298,19 @@ def fig_verdict(summ: pd.DataFrame) -> None:
         print("skip bess_verdict.png: no Tier-2 pooled row yet")
         return
     r = p.iloc[0]
-    names = ["CV AUC", "bootstrap CI lower", "cross-region holdout", "battery-only arm"]
-    vals = [float(r.auc_cv), float(r.ci_lo), float(r.auc_holdout),
+    # The pooled row has no holdout by construction (it trains on everything). Per G2.5
+    # the headline holdout is the LOWER of the two transfer directions, which live in the
+    # gb->us / us->gb rows -- reading auc_holdout off the pooled row just gives NaN and
+    # silently drops the bar.
+    dirs = summ[(summ.tier == 2) & (summ.arm == "all")
+                & summ.direction.isin(["gb->us", "us->gb"])]
+    hold = float(dirs.auc_holdout.min()) if len(dirs) else np.nan
+    names = ["CV AUC", "bootstrap CI lower", "cross-region holdout\n(lower direction)",
+             "battery-only arm"]
+    vals = [float(r.auc_cv), float(r.ci_lo), hold,
             float(r.auc_battery_only) if pd.notna(r.auc_battery_only) else np.nan]
     bars = [0.75, 0.68, 0.70, float(r.auc_cv) - 0.10]
-    fig, ax = plt.subplots(figsize=(8.6, 4.2))
+    fig, ax = plt.subplots(figsize=(9.0, 4.4), layout="constrained")
     x = np.arange(len(names))
     cols = [GOOD if (np.isfinite(v) and v >= b) else CRITICAL for v, b in zip(vals, bars)]
     ax.bar(x, vals, 0.5, color=cols, zorder=3)
@@ -307,7 +322,13 @@ def fig_verdict(summ: pd.DataFrame) -> None:
     ax.set_xticks(x, names, fontsize=9)
     ax.set_ylim(0.4, 1.0)
     ax.set_ylabel("AUC")
-    ax.set_title(f"Tier-2 verdict: {r.verdict.split(' -> ')[0] if isinstance(r.verdict, str) else ''}")
+    passed = all(np.isfinite(v) and v >= b for v, b in zip(vals, bars))
+    ax.set_title("Tier 2: batteries vs matched battery-free substations", pad=10)
+    ax.text(0.5, -0.20,
+            ("all four conditions met" if passed else "not all conditions met")
+            + "   ·   black rules are the pre-registered bars   ·   "
+            "battery-only bar tests whether the switchyard carries the signal",
+            transform=ax.transAxes, ha="center", fontsize=8.4, color=MUTED)
     _style(ax)
     _save(fig, "bess_verdict.png")
 
@@ -323,6 +344,15 @@ def main() -> None:
     if audit is not None:
         fig_tag_audit(audit)
     summ = _read("bess_stage2_summary.csv")
+    if summ is not None and len(summ):
+        # The summary file is append-and-dedup on (run_name, tier), so it accumulates
+        # runs. Figures must show ONE run per tier -- the most recent -- rather than
+        # silently mixing a 3-control run with an 8-control one.
+        summ["generated"] = pd.to_datetime(summ.generated, errors="coerce")
+        keep = summ.sort_values("generated").groupby("tier").run_name.last().to_dict()
+        summ = summ[[r.tier in keep and r.run_name == keep[r.tier]
+                     for r in summ.itertuples()]]
+        print("figures use: " + ", ".join(f"tier {t} = {n}" for t, n in keep.items()))
     if summ is not None:
         fig_tiers(summ)
         fig_verdict(summ)

@@ -430,10 +430,96 @@ partly a comparison of substations with substations. The G2.4-T2 battery-only ar
 supplementary check here — it is the only version of the question that is clean, and the
 Tier-2 headline must be read next to it in every region.
 
-### Stage 2 — separability
+### Stage 2 — separability (2026-09-03, `bess_final` / `bess_v2`, all three regions)
 
-Not yet run.
+**Tier 2 — the honest number. 139 matched sites, 251 controls.**
+
+| arm | n feat | CV AUC | CI | gb→us holdout | us→gb holdout |
+|---|---|---|---|---|---|
+| all | 32 | **0.866** | [0.826, 0.903] | 0.708 | 0.786 |
+| **imagery only (S2+S1)** | 27 | **0.825** | [0.783, 0.863] | 0.657 | 0.759 |
+| imagery, area-robust | 16 | 0.809 | [0.768, 0.849] | 0.672 | 0.874 |
+| S2 only | 21 | 0.788 | [0.736, 0.836] | | |
+| S1 only | 6 | 0.616 | [0.563, 0.675] | | |
+| context only (no imagery) | 5 | 0.678 | [0.615, 0.734] | | |
+
+| gate | result | measured |
+|---|---|---|
+| **G2.1-T2** | **PASS** | CV 0.866 ≥ 0.75, CI lo 0.826 ≥ 0.68, holdout **0.708** ≥ 0.70 (the *lower* direction, per G2.5) |
+| G2.2-T2 | no | nowhere near the fail band |
+| **G2.4-T2 switchyard** | **PASS** | battery-only sub-polygon **0.869** vs 0.866 full — subtracting the substation does not reduce it |
+| G2.7 ablation | PASS | context-only 0.678 vs 0.866; gap 0.188, far above the 0.03 that would make it a prior |
+| G2.5 transfer | reported | gb→us 0.708, us→gb 0.786; headline takes the lower |
+| **P2 null geometry** | **PASS** | permutation null median **0.486**, 95th 0.543, p = 0.000 |
+| **G2.0-T2** | **FAIL** | 139 sites ≥ 90 ✓, 100% of pairs within 40 km ✓, but **251 controls < 270** ✗ |
+| **P1 balance** | **FAIL** | on `n_px` (SMD 0.162, AUC 0.550); all other matchable covariates pass |
+
+G2.6 strata: `5k-20k` 0.878, `≥20k` 0.836. Hybrids **0.816** against non-hybrids **0.894** —
+the solar-co-tagged sites score *lower*, so the 37% of Californian sites that are hybrids
+are not what is producing the result.
+
+**Tier 1 — and it did not behave as designed.** 130 sites, 696 controls, `all` 0.824,
+imagery 0.825, S2 0.784, S1 0.795, context 0.583. It was pre-registered as the easy
+comparison and an upper bound, with a 0.85 bar, and it came in **below Tier 2**. The reason
+is in its own control definition: Tier-1 controls are matched on road, line and industrial
+distance, which forces them to be infrastructure-adjacent land rather than open
+countryside. So Tier 1 is not an upper bound and is not reported as one. It clears its
+G2.2-T1 debug threshold (0.824 > 0.75), so the harness is sound; it misses G2.1-T1's 0.85.
+Its balance also fails on `elev_m`, `slope_deg` and `d_industrial_m`.
+
+**The two shortfalls, and what they do and do not permit.**
+
+*G2.0-T2 control count, 251 against 270.* Not fixable by drawing harder: controls per site
+were raised 3 → 5 → 8 and the pool moved 232 → 248 → 251, because the calipers and not the
+candidate list are the binding constraint. What that sweep does show is stability — the
+headline read 0.852, 0.877 and 0.866 across those three runs, all far above the 0.75 bar,
+so the conclusion does not hinge on the 7% shortfall. The gate is recorded as failed
+regardless.
+
+*P1 on `n_px`.* Battery windows average 418 px against 386 for controls (SMD 0.162). It was
+driven down from SMD 0.368 by ranking candidates on size-closeness and then matching on the
+realized rasterized window rather than a geodesic proxy, but it cannot reach zero: small
+substations vastly outnumber large ones, so for most battery sites no equal-or-larger
+control exists within 40 km, and greedy sign-balanced selection barely moved it. Rather
+than argue the residual away it was **tested**: the `imagery_robust` arm drops every order
+statistic — `bright_p95`, `tex_std`, every `*_max` — keeping only means and differences of
+means, which are size-invariant, and returns **0.809 against 0.825**. The size imbalance is
+real and does not carry the result.
 
 ## Verdict
 
-Not yet reached.
+**Battery storage does produce a signal in Sentinel-1/Sentinel-2 at 10 m that is specific
+to the battery rather than to the substation beside it.** Tier 2 clears all three
+pre-registered G2.1 conditions, the switchyard control (G2.4-T2) and the siting-prior
+control (G2.7) both pass, and the permutation null sits at 0.486.
+
+Read with three qualifications, in descending order of how much they matter:
+
+1. **Two pre-registered checks failed** — G2.0-T2 on control count (251/270) and P1 on
+   region-size balance. Both are documented above with the evidence that neither explains
+   the result, but neither is waived. Gate 0 as pre-registered also failed, and was amended
+   on 2026-09-02 in its own commit before any Stage 2 number existed.
+2. **The imagery-only number is 0.825, not 0.866.** The pre-registered `all` arm includes
+   five OSM-derived context features, and `d_line_m` alone scores 0.860 as a single
+   feature — a substation sits on the network and a battery sits beside it, which is real
+   topology but is not a signal in the imagery. For the question actually asked, the
+   0.825 imagery-only figure is the answer, and the 0.788 S2-only / 0.616 S1-only split
+   says the optical bands carry most of it.
+3. **A mapping-convention confound cannot be excluded.** OSM may outline batteries tightly
+   around equipment while substation outlines include grassy compounds, and the red-edge
+   bands B06/B07 leading the feature ranking is consistent with a vegetation difference
+   between the two polygon conventions rather than a difference between the objects. This
+   is not testable from OSM alone; it needs a hand-checked sample against high-resolution
+   imagery. For a detector aimed at the *mapped* class it matters less, but it qualifies
+   any claim about physics.
+
+Stage 1 remains part of the finding, not a footnote: the production substation detector
+scores batteries **below** area-comparable substations in GB (0.307) and CA (0.248) and
+cannot distinguish them at all in TX (0.483), and in all three regions removing the
+overlapping substation lowers the score. So the cheap re-ranking route is dead, while the
+class is separable once a classifier is given the battery class itself.
+
+**Next step, if pursued:** Stage 5 — build chips with `--fraction` / `all_touched=False`
+from day one and fine-tune. G2.1-T2 passing is what authorises that GPU spend. The
+bi-temporal `s2pre` pass was never composited, because Tier 2 did not land in the
+0.65–0.75 dead band that would have called for it.
