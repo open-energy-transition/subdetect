@@ -41,7 +41,25 @@ def run_compose(
     out_dir = region_dir / "composites"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    cells = select_cells(aoi, cfg, settings, radius_km, min_voltage)
+    try:
+        cells = select_cells(aoi, cfg, settings, radius_km, min_voltage)
+    except FileNotFoundError:
+        # A feasibility AOI (e.g. the BESS study's gb_bess/ca_bess/tx_bess) carries no
+        # substation or line labels of its own, so the ROI rule -- "within radius_km of a
+        # mapped power line or substation" -- cannot be evaluated. That is fine precisely
+        # when an explicit cell list was supplied, because the cells_file branch below
+        # synthesises every cell from the AOI lattice anyway. Without a cell list this
+        # stays a hard error: it means `osm --aoi` was never run.
+        if cells_file is None:
+            raise
+        import pandas as pd
+
+        cells = pd.DataFrame({
+            "ix": pd.Series(dtype="int64"), "iy": pd.Series(dtype="int64"),
+            "name": pd.Series(dtype="object"), "has_label": pd.Series(dtype="bool"),
+            "line_km": pd.Series(dtype="float64"),
+            "lon0": pd.Series(dtype="float64"), "lat0": pd.Series(dtype="float64"),
+        })
     if cells_file:
         # Explicit cell list, bypassing ROI selection entirely. The ROI rule is "within
         # radius_km of a power line or substation", which structurally excludes targets
@@ -73,12 +91,23 @@ def run_compose(
         log.info("bbox filter %s: %d -> %d cells", bbox_filter, n0, len(cells))
     if limit:
         cells = cells.head(limit)
-    s2_window = tuple(settings.raw.get("s2_window", ("2025-11-01", "2026-03-15")))
-    s1_window = tuple(settings.raw.get("s1_window", ("2025-11-01", "2026-03-15")))
+    # Per-AOI window overrides. The global dry-season window is tuned to Pakistan; a
+    # Nov-Mar composite over Great Britain is cloud-wrecked and shot at ~15 deg sun
+    # elevation. AOIs without their own key fall through to the global value unchanged.
+    _dflt = ("2025-11-01", "2026-03-15")
+    s2_window = tuple(cfg.get("s2_window", settings.raw.get("s2_window", _dflt)))
+    s1_window = tuple(cfg.get("s1_window", settings.raw.get("s1_window", _dflt)))
+    # Pre-construction window for --sensor s2pre. Per-AOI only: there is no sensible
+    # global default for "before this class of thing was built".
+    s2_pre_window = tuple(cfg.get("s2_pre_window") or ()) or None
+    if sensor == "s2pre" and s2_pre_window is None:
+        raise KeyError(f"AOI '{aoi}' has no s2_pre_window in configs/aoi.yaml")
     layer = {"s2": "composite_0.tif", "s1": "composite_s1.tif",
-             "towerprior": "composite_tower.tif", "dem": "composite_dem.tif"}[sensor]
+             "towerprior": "composite_tower.tif", "dem": "composite_dem.tif",
+             "s2pre": "composite_pre.tif"}[sensor]
     bands = {"s2": LOCAL_BANDS, "s1": S1_BANDS,
-             "towerprior": TOWER_PRIOR_BANDS, "dem": DEM_BANDS}[sensor]
+             "towerprior": TOWER_PRIOR_BANDS, "dem": DEM_BANDS,
+             "s2pre": LOCAL_BANDS}[sensor]
     log.info("Compositing %s for %d cells of %s (%d workers) -> %s",
              sensor.upper(), len(cells), aoi, workers, layer)
 
@@ -101,6 +130,20 @@ def run_compose(
                 with rasterio.open(base) as b:
                     gbox = GeoBox((b.height, b.width), b.transform, b.crs)
                 res = s1_composite(bbox, date_range=s1_window, geobox=gbox)
+            elif sensor == "s2pre":
+                # Pre-construction S2 composite for the bi-temporal arm. Pinned to the
+                # cell's current-epoch grid so the two dates difference pixel-for-pixel
+                # with no resampling -- the same geobox trick as S1 and DEM. Deliberately
+                # NOT composite_1.tif: that name already means "post-monsoon contrast
+                # season" in the Pakistan tree and build_multidate_chips.py reads it.
+                base = cell_dir / "composite_0.tif"
+                if not base.exists():
+                    return False
+                from odc.geo.geobox import GeoBox
+
+                with rasterio.open(base) as b:
+                    gbox = GeoBox((b.height, b.width), b.transform, b.crs)
+                res = annual_composite(bbox, date_range=s2_pre_window, geobox=gbox)
             elif sensor == "dem":
                 # Pinned to the cell's S2 grid so terrain aligns with composite_0 exactly,
                 # and derived on that metric grid (dx=dy=10 m) rather than on the DEM's

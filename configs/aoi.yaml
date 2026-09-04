@@ -39,6 +39,42 @@ aois:
     # Cap composited training cells (network-bound); ranked by summed substation area.
     max_train_cells: 600
 
+  # ---- BESS feasibility study AOIs (branch bess-feasibility) ------------------
+  # Three regions with real OSM battery-storage density; Pakistan/India have ~0
+  # (plant:source=battery: PK 1, IN 0, measured 2026-09-01). Train/CV on one group,
+  # cross-region holdout on the other, both directions reported.
+  #
+  # Deliberately no grid_origin (own lattice; a shared origin would put ix/iy negative
+  # and break compose.py's int(name[:4]) cell-name parse), no val_bbox (the holdout is
+  # region-level), and no max_train_cells (that key routes select_cells into
+  # training_cells, which reads a substations_poly.parquet these AOIs do not have).
+  # Cells come from --cells-file, written by scripts/build_bess_labels.py.
+  #
+  # Per-AOI windows: the global window below is Pakistan's dry season. GB in Nov-Mar is
+  # cloud-wrecked at ~15 deg sun elevation, so each AOI takes its local growing season.
+  # s2_pre_window is the pre-construction epoch for --sensor s2pre: 2018 is dense in the
+  # L2A archive and predates essentially all grid-scale BESS in these three markets.
+  gb_bess:
+    bbox: [-8.2, 49.8, 2.0, 61.1]   # north to 61.1 to include Orkney/Shetland
+    division: { name: Great Britain, country: GB, subtype: country }
+    s2_window: ["2025-05-01", "2025-09-15"]
+    s1_window: ["2025-05-01", "2025-09-15"]
+    s2_pre_window: ["2018-05-01", "2018-09-15"]
+
+  ca_bess:
+    bbox: [-124.5, 32.5, -114.1, 42.1]
+    division: { name: California, country: US, subtype: state }
+    s2_window: ["2025-04-01", "2025-10-31"]
+    s1_window: ["2025-04-01", "2025-10-31"]
+    s2_pre_window: ["2018-04-01", "2018-10-31"]
+
+  tx_bess:
+    bbox: [-106.7, 25.8, -93.5, 36.6]
+    division: { name: Texas, country: US, subtype: state }
+    s2_window: ["2025-03-01", "2025-10-31"]
+    s1_window: ["2025-03-01", "2025-10-31"]
+    s2_pre_window: ["2018-03-01", "2018-10-31"]
+
 # Dry-season composite window (matches earthpv's Pakistan base composites so
 # hardlinked cells are consistent with newly composed ones).
 s2_window: ["2025-11-01", "2026-03-15"]

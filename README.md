@@ -132,8 +132,36 @@ Readable write-up with charts: **[docs/hydro-feasibility.md](docs/hydro-feasibil
 Technical log with the pre-registered thresholds:
 [docs/issues/hydro-small-runofriver-feasibility.md](docs/issues/hydro-small-runofriver-feasibility.md).
 
+## A third target class: grid-scale battery storage (feasibility study)
+
+Battery energy storage is the first class this pipeline could not study at home: Pakistan
+and NW India contain **one** `plant:source=battery` object between them, so the study had
+to buy new imagery over Great Britain, California and Texas — 511 mapped sites, 389 cells,
+6.9 GB.
+
+Batteries are also built on top of substations: **76% have one within 300 m and 41% of
+their polygons overlap one outright** (Texas: 92% and 63%). Every positive is therefore
+compared against an area- and shape-matched **battery-free substation**, and a separate arm
+re-scores each site with the overlapping substation subtracted.
+
+The class is separable: **AUC 0.866** (CI 0.826–0.903), cross-region holdout 0.708, and
+**0.825 on Sentinel-1/Sentinel-2 imagery alone**. The switchyard is not the source — the
+battery-only sub-polygon scores 0.869 — and context alone gives 0.678, so it is not a
+siting prior either. Two pre-registered checks failed and are documented rather than
+waived. Still no GPU time spent.
+
+Two side findings worth their own line. The production substation model, trained only on
+Pakistan and NW India, fires on **85% of Californian** transmission substations ≥20,000 m² —
+better than its 0.714 recall at home. And it scores batteries *below* comparable
+substations, so re-ranking existing candidates would rank them last.
+
+Readable write-up with charts: **[docs/bess-feasibility.md](docs/bess-feasibility.md)**.
+Technical log with the pre-registered thresholds and the amendment:
+[docs/issues/bess-detectability-feasibility.md](docs/issues/bess-detectability-feasibility.md).
+
 ## Documentation map
 
+- [docs/bess-feasibility.md](docs/bess-feasibility.md) — the battery-storage feasibility study, written for a general reader
 - [docs/hydro-feasibility.md](docs/hydro-feasibility.md) — the small run-of-river hydro feasibility study, written for a general reader
 - [docs/architecture.md](docs/architecture.md) — full pipeline stage-by-stage, the earthpv relationship, and the `scripts/` catalogue
 - [docs/worked-example.md](docs/worked-example.md) — pixel-level walkthrough of one real detection
