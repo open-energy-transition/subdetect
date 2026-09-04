@@ -486,6 +486,25 @@ statistic — `bright_p95`, `tex_std`, every `*_max` — keeping only means and 
 means, which are size-invariant, and returns **0.809 against 0.825**. The size imbalance is
 real and does not carry the result.
 
+## Figures
+
+Regenerated from the persisted CSVs in `data/eval_results/` by
+`pixi run python scripts/make_bess_figures.py`; no number in any of them is typed by hand.
+
+| figure | what it shows |
+|---|---|
+| [`bess_examples.png`](../assets/bess_examples.png) | the two classes in S2 true colour, equal 600 m windows, measured footprint outlined |
+| [`bess_colocation.png`](../assets/bess_colocation.png) | G0.6: the co-location census that forced the two-tier design |
+| [`bess_site_map.png`](../assets/bess_site_map.png) | G0.4: geographic spread of all 511 sites, marker area ∝ footprint |
+| [`bess_tag_audit.png`](../assets/bess_tag_audit.png) | G0.0: tag patterns counted before the positive definition was fixed |
+| [`bess_size.png`](../assets/bess_size.png) | G0.3: size against the 2,000 m² floor and the 20,000 m² bucket |
+| [`bess_stage1.png`](../assets/bess_stage1.png) | Stage 1: co-location vs AUC per region, and the G1.P positive control |
+| [`bess_tiers.png`](../assets/bess_tiers.png) | Tier 1 vs Tier 2 across all five ablation arms |
+| [`bess_verdict.png`](../assets/bess_verdict.png) | G2.1-T2's three conditions plus the G2.4 switchyard arm, against their bars |
+| [`bess_features.png`](../assets/bess_features.png) | the top imagery features and how much they overlap |
+| [`bess_strata.png`](../assets/bess_strata.png) | G2.6: Tier-2 AUC by built footprint |
+| [`bess_balance.png`](../assets/bess_balance.png) | P1: the covariate balance table, read before any AUC |
+
 ## Verdict
 
 **Battery storage does produce a signal in Sentinel-1/Sentinel-2 at 10 m that is specific

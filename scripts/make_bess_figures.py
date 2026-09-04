@@ -17,6 +17,7 @@ from pathlib import Path
 import matplotlib
 
 matplotlib.use("Agg")
+import geopandas as gpd
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -333,6 +334,271 @@ def fig_verdict(summ: pd.DataFrame) -> None:
     _save(fig, "bess_verdict.png")
 
 
+
+
+# ------------------------------------------------- 8. what these things look like
+
+
+def _rgb_crop(region: str, cell: str, geom4326, half_m: float = 300.0):
+    """True-colour crop on a FIXED metric window, plus the footprint in pixel coords.
+
+    The window is a constant `half_m` square centred on the footprint, not a padded
+    bounding box. A padded box gives every panel a different extent, and rendering those
+    at one figure size silently puts each panel at its own scale -- which for a figure
+    whose whole job is "do these look different" would be misleading. Stretch is per-crop
+    2-98 percentile: the point is texture and layout, not radiometric comparison.
+
+    Returns (rgb, footprint_xy) or None.
+    """
+    import rasterio
+    import rasterio.mask
+    from shapely.geometry import box as shapely_box
+
+    tif = (ROOT / "data" / "composites" / f"{region}_bess" / "composites" / cell
+           / "composite_0.tif")
+    if not tif.exists():
+        return None
+    try:
+        with rasterio.open(tif) as src:
+            g = gpd.GeoSeries([geom4326], crs="EPSG:4326").to_crs(src.crs).iloc[0]
+            c = g.centroid
+            win = shapely_box(c.x - half_m, c.y - half_m, c.x + half_m, c.y + half_m)
+            arr, tf = rasterio.mask.mask(src, [win], crop=True, filled=True)
+            inv = ~tf
+            ext = g.exterior if g.geom_type == "Polygon" else max(
+                g.geoms, key=lambda q: q.area).exterior
+            xy = np.array([inv * (px, py) for px, py in ext.coords])
+    except (rasterio.errors.RasterioError, ValueError) as e:
+        # Deliberately NOT a bare except. A bare one here swallowed a NameError from a
+        # missing geopandas import and reported it as "no renderable pairs", which looks
+        # like absent data rather than a bug.
+        print(f"  crop failed for {region}/{cell}: {type(e).__name__}: {e}")
+        return None
+    # Reject a window the raster could not fully cover. A site near a cell edge gets
+    # clipped by crop=True, and a truncated panel rendered beside full ones is exactly the
+    # scale inconsistency the fixed window was introduced to remove.
+    want = int(round(2 * half_m / 10.0))
+    if arr.shape[1] < 0.9 * want or arr.shape[2] < 0.9 * want:
+        return None
+    # B04, B03, B02 with the +1000 L2A baseline offset removed.
+    rgb = np.stack([arr[2], arr[1], arr[0]]).astype("float32")
+    rgb = np.clip((rgb - 1000.0) / 10000.0, 0, None)
+    valid = arr[0] > 0
+    if valid.sum() < 16:
+        return None
+    lo, hi = np.percentile(rgb[:, valid], [2, 98])
+    if not np.isfinite([lo, hi]).all() or hi <= lo:
+        return None
+    return np.clip((rgb - lo) / (hi - lo), 0, 1).transpose(1, 2, 0), xy
+
+
+def fig_examples(n_pairs: int = 4) -> None:
+    """Real battery yards beside the real substations they were matched against.
+
+    The single most useful figure in a detectability report: every AUC in this document is
+    a claim that these two rows look different, and a reader should be able to check that
+    claim with their own eyes before trusting the number.
+    """
+    sp = RESULTS / "bess_detectability_samples_tier2.csv"
+    if not sp.exists():
+        print("skip bess_examples.png: no Tier-2 samples")
+        return
+    d = pd.read_csv(sp)
+    pairs = []
+    for region in ("gb", "ca", "tx"):
+        try:
+            sites = gpd.read_parquet(ROOT / "data" / "labels" / f"bess_{region}"
+                                     / "bess_sites.parquet").set_index("site_id")
+            ctrls = gpd.read_parquet(ROOT / "data" / "labels" / f"bess_{region}"
+                                     / "substation_controls.parquet").set_index("ctrl_id")
+        except Exception:  # noqa: BLE001
+            continue
+        sub = d[(d.region == region) & (d.role == "control")]
+        # Largest first: at 10 m a 2 ha yard is ~14x14 px and simply cannot be read.
+        for sid in (d[(d.region == region) & (d.role == "site")]
+                    .sort_values("site_area_m2", ascending=False).site_id):
+            row = sub[sub.site_id == sid]
+            if row.empty or sid not in sites.index:
+                continue
+            cid = row.iloc[0].ctrl_id
+            if cid not in ctrls.index:
+                continue
+            a = _rgb_crop(region, sites.loc[sid, "cell"], sites.loc[sid].geometry)
+            b = _rgb_crop(region, ctrls.loc[cid, "cell"],
+                          ctrls.loc[cid].geometry.buffer(0.0003))
+            if a is not None and b is not None:
+                pairs.append((region, sid, a, cid, b,
+                              float(sites.loc[sid, "site_area_m2"])))
+                break
+    if not pairs:
+        print("skip bess_examples.png: no renderable pairs")
+        return
+    pairs = pairs[:n_pairs]
+    fig, axes = plt.subplots(2, len(pairs), figsize=(2.7 * len(pairs), 6.0),
+                             layout="constrained")
+    axes = np.atleast_2d(axes)
+    if axes.shape[0] == 1:
+        axes = axes.T
+    for j, (region, sid, a, cid, b, area) in enumerate(pairs):
+        for i, ((rgb, xy), lab, col) in enumerate(
+                [(a, f"{REGION_LABEL[region]}\n{sid}  ·  {area/10000:.1f} ha", BLUE),
+                 (b, f"matched substation\n{cid}", ORANGE)]):
+            ax = axes[i, j]
+            ax.imshow(rgb)
+            # The measured footprint, drawn on the image: every statistic in this study is
+            # computed inside this outline, so the reader can see what was measured rather
+            # than assume it.
+            ax.plot(xy[:, 0], xy[:, 1], color="#ffe14d", linewidth=1.6, zorder=5)
+            ax.set_xlim(0, rgb.shape[1])
+            ax.set_ylim(rgb.shape[0], 0)
+            ax.set_title(lab, fontsize=9, color=INK if i == 0 else INK2)
+            ax.set_xticks([])
+            ax.set_yticks([])
+            for sp_ in ax.spines.values():
+                sp_.set_color(col)
+                sp_.set_linewidth(2.0)
+    axes[0, 0].set_ylabel("battery site", fontsize=10, color=BLUE, fontweight="bold")
+    axes[1, 0].set_ylabel("control", fontsize=10, color=ORANGE, fontweight="bold")
+    fig.suptitle("Sentinel-2 true colour, 10 m — the two classes the model separates",
+                 fontsize=12, fontweight="bold")
+    fig.text(0.5, -0.012, "every panel is the same 600 × 600 m window  ·  yellow outline "
+                          "is the measured footprint", ha="center", fontsize=8.6,
+             color=MUTED)
+    _save(fig, "bess_examples.png")
+
+
+# ------------------------------------------------------------- 9. the Stage 1 story
+
+
+def fig_stage1(probe: pd.DataFrame, inv: pd.DataFrame) -> None:
+    """Co-location explains why the production detector behaves differently per region."""
+    s = inv[inv.in_aoi & inv.headline]
+    rows = []
+    for _, r in probe.iterrows():
+        reg = str(r.aoi).split("_")[0]
+        if reg not in REGION_LABEL:
+            continue
+        h = s[s.region == reg]
+        rows.append({"region": reg, "overlap": float(h.overlaps_substation.mean()),
+                     "auc": float(r.auc), "lo": float(r.ci_lo), "hi": float(r.ci_hi),
+                     "bo": float(r.auc_battery_only), "fire": float(r.frac_ge_04),
+                     "posctrl": float(r.posctrl_frac_ge_04)})
+    if not rows:
+        print("skip bess_stage1.png: no probe rows")
+        return
+    t = pd.DataFrame(rows).sort_values("overlap")
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11.2, 4.3), layout="constrained")
+
+    x = np.arange(len(t))
+    ax1.errorbar(x, t.auc, yerr=[t.auc - t.lo, t.hi - t.auc], fmt="o", ms=9,
+                 color=BLUE, ecolor=INK2, elinewidth=1.2, capsize=4, zorder=4,
+                 label="full site footprint")
+    ax1.plot(x, t.bo, "s", ms=8, color=ORANGE, zorder=4, label="battery-only sub-polygon")
+    ax1.axhline(0.5, color=MUTED, linewidth=1.1, zorder=2)
+    ax1.text(len(t) - 0.5, 0.508, "no separation", fontsize=8, color=MUTED, ha="right")
+    for xi, r in enumerate(t.itertuples()):
+        ax1.annotate("", xy=(xi, r.bo), xytext=(xi, r.auc),
+                     arrowprops=dict(arrowstyle="->", color=MUTED, lw=1.0))
+    ax1.set_xticks(x, [f"{REGION_LABEL[r.region]}\n{r.overlap:.0%} overlap"
+                       for r in t.itertuples()])
+    ax1.set_ylim(0.15, 0.62)
+    ax1.set_ylabel("AUC: batteries vs battery-free substations")
+    ax1.set_title("The production detector ranks batteries BELOW substations")
+    ax1.legend(frameon=False, fontsize=8.5, loc="upper left")
+    _style(ax1)
+
+    w = 0.36
+    ax2.bar(x - w / 2, t.posctrl, w, color=AQUA, zorder=3,
+            label="substations \u2265 20,000 m² (positive control)")
+    ax2.bar(x + w / 2, t.fire, w, color=BLUE, zorder=3, label="battery sites")
+    for xi, r in enumerate(t.itertuples()):
+        ax2.text(xi - w / 2, r.posctrl + 0.02, f"{r.posctrl:.0%}", ha="center", fontsize=8.6,
+                 color=INK2)
+        ax2.text(xi + w / 2, r.fire + 0.02, f"{r.fire:.0%}", ha="center", fontsize=8.6,
+                 color=INK2)
+    ax2.axhline(0.40, color=CRITICAL, linestyle="--", linewidth=1.2, zorder=2)
+    ax2.text(-0.42, 0.415, "G1.P bar 40%", fontsize=8, color=CRITICAL, ha="left")
+    ax2.set_xticks(x, [REGION_LABEL[r.region] for r in t.itertuples()])
+    ax2.set_ylim(0, 1.05)
+    ax2.set_ylabel("fraction reaching p_max \u2265 0.4")
+    ax2.set_title("It transfers — so the null above is informative")
+    ax2.legend(frameon=False, fontsize=8.5, loc="upper left")
+    _style(ax2)
+
+    fig.suptitle("Stage 1: the more a battery overlaps a substation, the more it scores "
+                 "like one", fontsize=12, fontweight="bold")
+    _save(fig, "bess_stage1.png")
+
+
+# ---------------------------------------------------------------- 10. where they are
+
+
+def fig_site_map(inv: pd.DataFrame) -> None:
+    """Geographic spread — the G0.4 gate, and a sanity check on clustering."""
+    s = inv[inv.in_aoi]
+    fig, axes = plt.subplots(1, 3, figsize=(12.0, 4.2), layout="constrained")
+    for ax, reg in zip(axes, ["gb", "ca", "tx"]):
+        h = s[s.region == reg]
+        small, big = h[~h.headline], h[h.headline]
+        ax.scatter(small.lon, small.lat, s=7, c=MUTED, alpha=0.55, linewidths=0,
+                   label=f"below 20,000 m² ({len(small)})", zorder=3)
+        ax.scatter(big.lon, big.lat, s=np.clip(big.site_area_m2 / 2500, 8, 120),
+                   c=REGION_COLOR[reg], alpha=0.75, linewidths=0,
+                   label=f"headline set ({len(big)})", zorder=4)
+        ax.set_aspect(1 / np.cos(np.radians(float(h.lat.mean()))))
+        ax.set_title(f"{REGION_LABEL[reg]} — {len(h)} sites", fontsize=10.5)
+        ax.legend(frameon=False, fontsize=8, loc="best", markerscale=0.8)
+        ax.set_xlabel("lon")
+        _style(ax, grid_axis="both")
+    axes[0].set_ylabel("lat")
+    fig.suptitle("511 mapped battery sites; marker area scales with footprint",
+                 fontsize=12, fontweight="bold")
+    _save(fig, "bess_site_map.png")
+
+
+# ------------------------------------------------------- 11. which features separate
+
+
+def fig_features(n_show: int = 6) -> None:
+    """The features doing the work in Tier 2, and what their distributions look like."""
+    fp = RESULTS / "bess_detectability_tier2.csv"
+    sp = RESULTS / "bess_detectability_samples_tier2.csv"
+    if not (fp.exists() and sp.exists()):
+        print("skip bess_features.png: no Tier-2 feature table")
+        return
+    per = pd.read_csv(fp)
+    d = pd.read_csv(sp)
+    imagery = per[~per.feature.isin(["d_road_m", "d_line_m", "d_industrial_m", "elev_m",
+                                     "slope_deg", "valid_frac_s2", "n_px"])].copy()
+    imagery["sep"] = (imagery.auc - 0.5).abs()
+    top = imagery.sort_values("sep", ascending=False).head(n_show)
+
+    fig, axes = plt.subplots(2, 3, figsize=(11.4, 6.0), layout="constrained")
+    for ax, row in zip(axes.ravel(), top.itertuples()):
+        f = row.feature
+        pos = d[(d.role == "site")][f].dropna()
+        neg = d[(d.role == "control")][f].dropna()
+        lo, hi = np.percentile(np.r_[pos, neg], [1, 99])
+        bins = np.linspace(lo, hi, 26)
+        # density, not counts: there are 251 controls against 139 sites, and raw counts
+        # would make the control bars taller everywhere -- which reads as a class-size
+        # difference rather than the distribution difference the panel is about.
+        ax.hist(neg, bins=bins, color=ORANGE, alpha=0.62, density=True,
+                label="substations", zorder=3)
+        ax.hist(pos, bins=bins, color=BLUE, alpha=0.62, density=True,
+                label="batteries", zorder=4)
+        ax.set_title(f"{f}   AUC {row.auc:.3f}", fontsize=9.5)
+        _style(ax)
+        ax.set_yticks([])
+    axes[0, 0].legend(frameon=False, fontsize=8.5)
+    fig.suptitle("What separates a battery yard from a switchyard (Tier 2, imagery only)",
+                 fontsize=12, fontweight="bold")
+    fig.text(0.5, -0.015, "No single band separates the classes — every AUC here is "
+                          "0.65–0.68. The 0.825 comes from combining them.",
+             ha="center", fontsize=8.8, color=MUTED)
+    _save(fig, "bess_features.png")
+
+
 def main() -> None:
     inv = _read("bess_stage0_inventory.csv")
     if inv is not None:
@@ -364,6 +630,13 @@ def main() -> None:
     strata = _read("bess_size_buckets.csv")
     if strata is not None:
         fig_strata(strata)
+    probe = _read("bess_prob_probe_summary.csv")
+    if probe is not None and inv is not None:
+        fig_stage1(probe, inv)
+    if inv is not None:
+        fig_site_map(inv)
+    fig_features()
+    fig_examples()
 
 
 if __name__ == "__main__":

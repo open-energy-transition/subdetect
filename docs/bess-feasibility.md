@@ -20,6 +20,17 @@ The full gate document, with every threshold fixed before any data existed, is
 | **Verdict** | Tier 2 **passes** G2.1 on all three conditions; the switchyard and siting-prior controls both pass |
 | **GPU spent on training** | none |
 
+Before any statistics, the two classes this study separates, at the resolution it uses:
+
+![examples](assets/bess_examples.png)
+
+In the Texan and Californian panels the battery reads as a dark, uniform rectangular array
+on a light pad, against a substation that is a lighter compound with more internal
+structure. The British panel is the honest counter-example: that site is graded bare ground
+with the containers barely distinguishable, and it is the kind of case that keeps any single
+feature's AUC near 0.68. Neither class is comfortably resolved at 10 m — which is the whole
+reason this needed measuring rather than eyeballing.
+
 ---
 
 ## Why this was not a simple experiment
@@ -37,9 +48,28 @@ measured substation detection wearing a battery label.
 
 ![co-location](assets/bess_colocation.png)
 
+![site map](assets/bess_site_map.png)
+
 That single fact shaped the whole design. Every positive is compared against a **matched
 battery-free substation**, not against open countryside, and a separate arm re-scores each
 site with any overlapping substation subtracted.
+
+### What the labels actually are
+
+The positive definition was fixed only *after* counting how these objects are tagged in
+practice, so that "we assumed `plant:source=battery` and found nothing" could not be an
+outcome:
+
+![tag audit](assets/bess_tag_audit.png)
+
+Size is the other thing that had to be checked before buying imagery, because this pipeline
+has measured `p_max` of **exactly 0.000** for anything under 2,000 m² across all 23 of its
+substation runs:
+
+![size](assets/bess_size.png)
+
+Half the corpus falls below the 20,000 m² bucket where the pipeline has demonstrated
+recall, which is why the headline set is restricted to the 259 sites that clear it.
 
 ---
 
@@ -61,6 +91,8 @@ substations. In Texas it cannot tell them apart at all — because Texan battery
 almost always *contain* a switchyard, so the model fires on that and saturates (median
 `p_max` 0.996). The Texas number does not measure batteries; it measures how often a
 battery label encloses a substation.
+
+![stage 1](assets/bess_stage1.png)
 
 What replicates in all three regions is the mechanism rather than the verdict: **subtracting
 the overlapping substation always lowers the score** (−0.053, −0.039, −0.065). The response
@@ -91,6 +123,11 @@ The optical bands carry most of it; radar alone is weak here, which is the oppos
 this project found for substations, where S1 beat S2 outright.
 
 ![verdict](assets/bess_verdict.png)
+
+No single band does the work — the best individual feature reaches only 0.68, and the two
+distributions overlap heavily. The result comes from combining them:
+
+![features](assets/bess_features.png)
 
 **The controls are what make this readable:**
 
@@ -129,6 +166,8 @@ vastly outnumber large ones and for most battery sites no equal-or-larger contro
 within 40 km. So the residual was **tested** rather than argued away: an arm that drops
 every order statistic (`bright_p95`, `tex_std`, every `*_max`) and keeps only size-invariant
 means returns 0.809 against 0.825.
+
+![balance](assets/bess_balance.png)
 
 Gate 0 also failed as pre-registered, on label size and on same-cell control availability,
 and was [amended](issues/bess-detectability-feasibility.md#amendment-2026-09-02-before-any-stage-1-or-stage-2-number-existed)
