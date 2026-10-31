@@ -21,6 +21,13 @@ def run_training(config: Path, smoke: bool = False) -> Path:
 
     cfg = yaml.safe_load(Path(config).read_text())
     torch.set_float32_matmul_precision("medium")
+    if cfg.get("seed") is not None:
+        # Paired A/B arms (docs/issues/esri-core-labels.md) share a seed so they start from
+        # the same decoder init and see the same data order; the label is the only change.
+        # Unset = historical behaviour (unseeded).
+        from lightning import seed_everything
+
+        seed_everything(int(cfg["seed"]), workers=True)
 
     dm = SubDataModule(**cfg["data"])
     task_args = dict(cfg["task"])
