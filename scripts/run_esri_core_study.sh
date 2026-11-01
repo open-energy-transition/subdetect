@@ -18,6 +18,8 @@ STUDY=$1
 SEEDS=$2
 PIXI=/home/tobi/.pixi/bin/pixi
 LOG=data/esri_core/run_${STUDY}.log
+# GPU jobs take turns with earthpv's, which hold this lock for training/eval (shared 6 GB GTX 1060)
+GPU_LOCK=${GPU_LOCK:-/run/media/tobi/aidisc/earthpv/data/.gpu.lock}
 case $STUDY in
   s1) PARTNER=v12; UP=1 ;;
   s2) PARTNER=v5; UP=1 ;;
@@ -40,7 +42,7 @@ for s in $SEEDS; do
   for arm in ctl core; do
     cfg=configs/terramind_sub_v17_${STUDY}_${arm}_seed${s}.yaml
     echo "$(date '+%F %T') TRAIN $cfg" >> "$LOG"
-    "$PIXI" run -e ml train --config "$cfg" >> "data/esri_core/train_v17_${STUDY}_${arm}_seed${s}.log" 2>&1
+    flock "$GPU_LOCK" "$PIXI" run -e ml train --config "$cfg" >> "data/esri_core/train_v17_${STUDY}_${arm}_seed${s}.log" 2>&1
     echo "$(date '+%F %T') TRAIN exit $? $cfg" >> "$LOG"
   done
 done
@@ -50,7 +52,7 @@ for s in $SEEDS; do
     name=v17_${STUDY}_${arm}_seed${s}
     ck=$(best_ckpt data/models/stageA_${name} | tail -1)
     echo "$(date '+%F %T') INFER $name <- $ck" >> "$LOG"
-    "$PIXI" run -e ml python scripts/infer_sindh_test_ckpts.py infer --arm "${name}=${ck}:${UP}" >> "$LOG" 2>&1
+    flock "$GPU_LOCK" "$PIXI" run -e ml python scripts/infer_sindh_test_ckpts.py infer --arm "${name}=${ck}:${UP}" >> "$LOG" 2>&1
     "$PIXI" run -e ml python scripts/infer_sindh_test_ckpts.py fuse --a "$name" --b "$PARTNER" --out "${name}_fused" >> "$LOG" 2>&1
     "$PIXI" run -e ml python scripts/field_eval.py --run-name "$name" \
         --prob-dir "data/osmose_regions/sindh_test_${name}/prob" --labels pakistan >> "$LOG" 2>&1

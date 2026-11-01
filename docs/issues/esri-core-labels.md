@@ -1,7 +1,7 @@
 # Core-only substation labels from Esri imagery: do they make a better S2/S1 detector?
 
-**Status:** pre-registered 2026-10-31 on branch `esri-core-labels`. G0.1 and G0.2 passed;
-full-corpus core labels are being written; G0.3/G0.4 pending; no training number exists yet.
+**Status:** pre-registered 2026-10-31 on branch `esri-core-labels`. Stage 0 passed (G0.1-G0.4,
+2026-11-01); S1 study training queued; no training number exists yet.
 Results are appended under `## Results`. The gates and decision rules below are not to be
 moved after seeing data.
 
@@ -150,4 +150,48 @@ TorchGeo trims hardest; on dev this is partly correct (polygons offset from the 
 switchyard keep only the overlap, e.g. dev #28/#32) and partly grass/trees inside fenced
 yards. Whether it is too aggressive is what G0.4's TorchGeo half has to answer.
 
-**G0.3 / G0.4:** pending (full-corpus run `scripts/run_esri_core_labels.sh`).
+**G0.3 bloat -- PASS (both studies).** Full corpus at the final settings
+(`scripts/run_esri_core_labels.sh`, finished 2026-11-01 02:40):
+
+| | targets | positive px | -> ignore | no core (whole group ignore) |
+|---|---|---|---|---|
+| India | 1,420 | 492,712 | 59.0% | 128 |
+| Pakistan (+2 hardneg) | 1,221 | 182,127 | 43.1% | 28 |
+| **S1 corpus (PK+IN)** | 2,641 | 674,839 | **54.7%** (bar 10%) | 156 |
+| TorchGeo | 48,720 | 10,226,206 | 51.8% | 16,038 |
+| **S2 corpus** | 51,361 | 10,901,045 | **52.0%** (bar 5%) | 16,194 |
+
+The full corpus trims harder than the 36 dev targets suggested (India 59% vs 38% on dev).
+The "no core" targets are almost all tiny: 92% of TorchGeo targets < 2,000 m2 get no core
+(Europe/Africa 56% of all its targets), vs 3% at 6-20k m2 and 1% above; PK/IN < 2,000 m2: 36%.
+
+**G0.4 visual QC -- PASS.** 60 frozen targets (`qc_ids.txt`, drawn before grading, none used
+by the probe), sheets `data/esri_core/qc/g04/`, per-panel grades in `grades.csv`. Graded by
+Claude (not blind to the method, as pre-registered): **44 good, 14 acceptable, 2 harmful**
+-> good+acceptable 97% (bar >= 70%), harmful 3.3% (bar <= 15%). The two harmful cases:
+
+- #49: an offshore platform. Esri renders open water, the probe finds nothing, and the whole
+  S2-visible label becomes ignore. Coverage >= 0.7 does not catch this (the tile is valid).
+- #52: a 350,700 m2 switchyard fetched at 2 m. Upsampled 4x, the core is fragmentary and
+  roughly half of the real equipment goes to ignore. Factor-5 (2 m) targets are 1,212 of
+  51,360 and lose 59% of their pixels vs 46% for 0.5 m crops.
+
+Not acted on: the gate passed, so the method is not retuned on the QC sample.
+
+**Supplementary check (outside the pre-registered gate).** The frozen QC sample turned out
+to be skewed to large sites (TorchGeo < 2,000 m2: 1 of 30 vs 33% of the population; smallest
+QC target 1,500 m2), so G0.4 says nothing about the largest effect by target count: the
+16k tiny TorchGeo targets that lose their label entirely. 36 random "no core" targets
+< 2,000 m2 (24 TorchGeo, 12 PK/IN; `supp_small_nocore_ids.txt`, sheets
+`qc/supp_small_nocore/`): TorchGeo ones are 100-500 m2 polygons in European towns on roads,
+parking, warehouse roofs, fields, or at most a kiosk-sized building; PK/IN ones are urban
+rooftop / single-pixel polygons. None shows switchyard equipment; at 1-5 S2 pixels they are
+label noise. 0/36 graded harmful. So for the S2 study "core labels" also means "kiosk-type
+labels that S2 cannot see become ignore" -- ~0.4% of positive pixels, but a third of
+TorchGeo objects. Worth remembering when reading the S2 result.
+
+### Stage 1
+
+S1 study launched 2026-11-01 02:56 (`subdetect-v17-s1`, `scripts/run_esri_core_study.sh s1
+"0 1 2"`). It shares the GPU lock with earthpv's jobs, so it starts after earthpv v24
+finishes training.
