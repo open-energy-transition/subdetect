@@ -1,7 +1,7 @@
 # Core-only substation labels from Esri imagery: do they make a better S2/S1 detector?
 
 **Status:** pre-registered 2026-10-31 on branch `esri-core-labels`. Stage 0 passed (G0.1-G0.4,
-2026-11-01); S1 study training queued; no training number exists yet.
+2026-11-01); S1 study training, S2 study queued behind it; no training number exists yet.
 Results are appended under `## Results`. The gates and decision rules below are not to be
 moved after seeing data.
 
@@ -194,4 +194,8 @@ TorchGeo objects. Worth remembering when reading the S2 result.
 
 S1 study launched 2026-11-01 02:56 (`subdetect-v17-s1`, `scripts/run_esri_core_study.sh s1
 "0 1 2"`). It shares the GPU lock with earthpv's jobs, so it starts after earthpv v24
-finishes training.
+finishes training. First pair: seed-0 control trained 02:56-06:15.
+
+S2 study queued 2026-11-01 07:24 (`subdetect-v17-s2`, `scripts/run_esri_core_study.sh s2
+"0 1"`, log `data/esri_core/run_s2.log`). It waits for the S1 unit to exit, then trains its
+four runs under the same GPU lock. Partner arm for fusion = production S1 `v5`.
