@@ -194,7 +194,10 @@ TorchGeo objects. Worth remembering when reading the S2 result.
 
 S1 study launched 2026-11-01 02:56 (`subdetect-v17-s1`, `scripts/run_esri_core_study.sh s1
 "0 1 2"`). It shares the GPU lock with earthpv's jobs, so it starts after earthpv v24
-finishes training. First pair: seed-0 control trained 02:56-06:15.
+finishes training. Five of six runs trained 02:56-12:48. On 2026-11-01 14:59 systemd-oomd killed
+the unit (session-wide memory pressure; it was only waiting on the GPU lock for core seed 2) and
+the queued S2 study started in its place. Relaunched 2026-11-02 08:17 as `subdetect-v17-s1b`;
+the runner now skips runs its log marks finished, so only core seed 2 trains before inference.
 
 S2 study queued 2026-11-01 07:24 (`subdetect-v17-s2`, `scripts/run_esri_core_study.sh s2
 "0 1"`, log `data/esri_core/run_s2.log`). It waits for the S1 unit to exit, then trains its

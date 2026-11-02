@@ -9,8 +9,9 @@
 #       -- /usr/bin/bash scripts/run_esri_core_study.sh s1 "0 1 2"
 #
 # Paired arms are trained back to back per seed (ctl then core), so if the run is cut short
-# the finished seeds are still complete pairs. train.py resumes from last.ckpt, so a relaunch
-# continues where it stopped; a finished run (EarlyStopping) re-exits within one epoch.
+# the finished seeds are still complete pairs. A relaunch skips runs the log marks finished and
+# train.py resumes an unfinished one from last.ckpt. Never edit this file in place while a study
+# runs (bash reads scripts incrementally): write a new file and rename it over this one.
 # The fixed partner arm for fusion: S1 study -> production S2 v12_up2 (sindh_test_v12);
 # S2 study -> production S1 v5_s1only (sindh_test_v5).
 set -u
@@ -41,6 +42,8 @@ EOF
 for s in $SEEDS; do
   for arm in ctl core; do
     cfg=configs/terramind_sub_v17_${STUDY}_${arm}_seed${s}.yaml
+    # a relaunch skips finished runs (resuming one would train it an extra epoch past EarlyStopping)
+    if grep -qF "TRAIN exit 0 $cfg" "$LOG"; then echo "$(date '+%F %T') TRAIN skip (done) $cfg" >> "$LOG"; continue; fi
     echo "$(date '+%F %T') TRAIN $cfg" >> "$LOG"
     flock "$GPU_LOCK" "$PIXI" run -e ml train --config "$cfg" >> "data/esri_core/train_v17_${STUDY}_${arm}_seed${s}.log" 2>&1
     echo "$(date '+%F %T') TRAIN exit $? $cfg" >> "$LOG"
