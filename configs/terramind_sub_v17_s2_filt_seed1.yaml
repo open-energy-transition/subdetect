@@ -1,0 +1,75 @@
+# ESRI core-label study (s2, arm=filt, seed=1) -- docs/issues/esri-core-labels.md
+# filt = control labels with every target whose Esri core share < 0.10 set to ignore
+#   (scripts/esri_core_filter_labels.py); paired with the already-trained ctl run of this seed.
+# Paired A/B: identical to configs/terramind_sub_v16_honestburn.yaml except index_path, checkpoint_dir,
+# seed, and max_epochs 60->40 / patience 15->10 (GPU budget; v16 peaked at epoch 20; both arms alike).
+# control = OSM polygons re-burned centre-in (v16 burn); core = the same masks rewritten
+# from Esri core maps (core -> 1, rest of the original positive -> ignore -1).
+# Judge ONLY with scripts/field_eval.py on sindh_test (raw OSM truth), never val/IoU_1:
+# the two arms' val masks differ, so their IoU is not comparable.
+data:
+  index_path: data/chips_v17_filter/combined/index.parquet
+  batch_size: 8
+  num_workers: 4
+  modalities:
+  - S2L2A
+task:
+  model_factory: EncoderDecoderFactory
+  model_args:
+    backbone: terramind_v1_tiny
+    backbone_pretrained: true
+    backbone_modalities:
+    - S2L2A
+    backbone_bands:
+      S2L2A:
+      - BLUE
+      - GREEN
+      - RED
+      - RED_EDGE_1
+      - RED_EDGE_2
+      - RED_EDGE_3
+      - NIR_BROAD
+      - NIR_NARROW
+      - SWIR_1
+      - SWIR_2
+    necks:
+    - name: SelectIndices
+      indices:
+      - 2
+      - 5
+      - 8
+      - 11
+    - name: ReshapeTokensToImage
+      remove_cls_token: false
+    - name: LearnedInterpolateToPyramidal
+    decoder: UNetDecoder
+    decoder_channels:
+    - 256
+    - 128
+    - 64
+    - 32
+    num_classes: 2
+    rescale: true
+  loss: tversky
+  tversky_args:
+    alpha: 0.35
+    beta: 0.65
+    gamma: 1.33
+  class_weights:
+  - 0.25
+  - 0.75
+  ignore_index: -1
+  lr: 0.0001
+  optimizer: AdamW
+  optimizer_hparams:
+    weight_decay: 0.05
+  freeze_backbone: false
+  plot_on_val: false
+trainer:
+  max_epochs: 40
+  accumulate_grad_batches: 2
+checkpoint_dir: data/models/stageA_v17_s2_filt_seed1
+patience: 10
+monitor: val/IoU_1
+monitor_mode: max
+seed: 1

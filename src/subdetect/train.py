@@ -21,6 +21,13 @@ def run_training(config: Path, smoke: bool = False) -> Path:
 
     cfg = yaml.safe_load(Path(config).read_text())
     torch.set_float32_matmul_precision("medium")
+    if cfg.get("seed") is not None:
+        # Paired A/B arms (docs/issues/esri-core-labels.md) share a seed so they start from
+        # the same decoder init and see the same data order; the label is the only change.
+        # Unset = historical behaviour (unseeded).
+        from lightning import seed_everything
+
+        seed_everything(int(cfg["seed"]), workers=True)
 
     dm = SubDataModule(**cfg["data"])
     task_args = dict(cfg["task"])
@@ -99,8 +106,22 @@ def run_training(config: Path, smoke: bool = False) -> Path:
             dirpath=ckpt_dir, filename="terramind-sub-{epoch:02d}-{step}",
             monitor=monitor, save_top_k=2, mode=mode, save_last=True,
         ),
-        EarlyStopping(monitor=monitor, patience=cfg.get("patience", 8), mode=mode),
     ]
+    # `early_stopping: false` trains to a fixed budget (max_epochs) under a schedule that
+    # decays to its end, and the model is the final weights (last.ckpt), not an epoch picked
+    # on the 289-chip val set, whose val/IoU_1 swings 0.06-0.26 between neighbouring epochs.
+    # The recipe is earthpv's v22 (warmup + cosine + weight EMA), which ended the same epoch
+    # lottery there. Every run up to v17 stops after `patience` epochs instead.
+    if cfg.get("early_stopping", True):
+        callbacks.append(EarlyStopping(monitor=monitor, patience=cfg.get("patience", 8),
+                                       mode=mode))
+    if cfg.get("ema"):
+        # Exponential moving average of the weights: validation runs on the average and every
+        # checkpoint's state_dict holds it (the raw weights ride along), so inference loads
+        # the averaged model unchanged and a resumed run restores both.
+        from lightning.pytorch.callbacks import EMAWeightAveraging
+
+        callbacks.append(EMAWeightAveraging(decay=float(cfg["ema"].get("decay", 0.999))))
     trainer_kwargs = dict(cfg.get("trainer", {}))
     if smoke:
         trainer_kwargs.update(max_steps=50, val_check_interval=25, limit_val_batches=4,
@@ -114,6 +135,11 @@ def run_training(config: Path, smoke: bool = False) -> Path:
         **trainer_kwargs,
     )
     trainer.fit(task, datamodule=dm, ckpt_path=str(resume_ckpt) if resume_ckpt.exists() else None)
+    if not cfg.get("early_stopping", True) and not smoke and not trainer.interrupted:
+        # A fixed-budget run's model is its final state, so write it here: Lightning 2.6's
+        # ModelCheckpoint refreshes last.ckpt only at a step where it also saves a top-k
+        # checkpoint (earthpv v22 seed 1's last.ckpt was left one epoch short, 2026-10-31).
+        trainer.save_checkpoint(ckpt_dir / "last.ckpt")
     best = callbacks[0].best_model_path or str(ckpt_dir / "last.ckpt")
     log.info("Best checkpoint: %s", best)
     return Path(best)

@@ -1,0 +1,64 @@
+# ESRI core-label study (s1, arm=core, seed=0) -- docs/issues/esri-core-labels.md
+# Paired A/B: identical to configs/terramind_sub_v5_s1only.yaml except index_path, checkpoint_dir and seed, and monitor val/mIoU -> val/IoU_1 (the project default since 2026-07-22).
+# control = OSM polygons re-burned centre-in (v16 burn); core = the same masks rewritten
+# from Esri core maps (core -> 1, rest of the original positive -> ignore -1).
+# Judge ONLY with scripts/field_eval.py on sindh_test (raw OSM truth), never val/IoU_1:
+# the two arms' val masks differ, so their IoU is not comparable.
+data:
+  index_path: data/chips_v5_core/combined/index.parquet
+  batch_size: 8
+  num_workers: 4
+  modalities:
+  - S1RTC
+task:
+  model_factory: EncoderDecoderFactory
+  model_args:
+    backbone: terramind_v1_tiny
+    backbone_pretrained: true
+    backbone_modalities:
+    - S1RTC
+    backbone_bands:
+      S1RTC:
+      - VV
+      - VH
+    necks:
+    - name: SelectIndices
+      indices:
+      - 2
+      - 5
+      - 8
+      - 11
+    - name: ReshapeTokensToImage
+      remove_cls_token: false
+    - name: LearnedInterpolateToPyramidal
+    decoder: UNetDecoder
+    decoder_channels:
+    - 256
+    - 128
+    - 64
+    - 32
+    num_classes: 2
+    rescale: true
+  loss: tversky
+  tversky_args:
+    alpha: 0.35
+    beta: 0.65
+    gamma: 1.33
+  class_weights:
+  - 0.25
+  - 0.75
+  ignore_index: -1
+  lr: 0.0001
+  optimizer: AdamW
+  optimizer_hparams:
+    weight_decay: 0.05
+  freeze_backbone: false
+  plot_on_val: false
+trainer:
+  max_epochs: 60
+  accumulate_grad_batches: 2
+checkpoint_dir: data/models/stageA_v17_s1_core_seed0
+patience: 15
+monitor: val/IoU_1
+monitor_mode: max
+seed: 0

@@ -28,6 +28,23 @@ _S1_MEAN = np.array(S1_MEAN, dtype="float32")[:, None, None]
 _S1_STD = np.array(S1_STD, dtype="float32")[:, None, None]
 
 
+def _drop_from_page_cache(path: str) -> None:
+    """Tell the kernel this chip's pages need not stay cached (earthpv's guard). A corpus larger
+    than a unit's MemoryMax otherwise fills the page cache charged to the unit, and the
+    in-cgroup reclaim that follows is the pressure systemd-oomd kills on (subdetect-v17-s2b,
+    2026-11-03: 18.6 GB, mostly chip page cache). Reads are unchanged."""
+    import os
+
+    try:
+        fd = os.open(path, os.O_RDONLY)
+        try:
+            os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+        finally:
+            os.close(fd)
+    except (OSError, AttributeError):
+        pass
+
+
 def _load_s1(path: str) -> np.ndarray:
     """Read the S1 uint16 DN chip -> standardized dB, nodata (DN==0) -> mean (x=0)."""
     with rasterio.open(path) as src:
@@ -54,8 +71,14 @@ def _load_tower(path: str) -> np.ndarray:
 
 class SubChipDataset(Dataset):
     def __init__(self, index: pd.DataFrame, modalities: list[str], augment: bool = False,
-                 upsample: int = 1, n_revisits: int = 1, target: str = "class"):
+                 upsample: int = 1, n_revisits: int = 1, target: str = "class",
+                 jitter: dict | None = None, drop_page_cache: bool = False):
         self.index = index.reset_index(drop=True)
+        # Radiometric jitter (training only, earthpv's v22 recipe): with probability `p`, each
+        # S2 band x a gain from 1 +/- `gain`, plus one offset from +/- `offset` (reflectance),
+        # the same draw for every revisit of a multi-date stack. S1 is left alone.
+        self.jitter = jitter
+        self.drop_page_cache = drop_page_cache
         self.modalities = modalities
         # target="fraction": masks are float32 sub-pixel coverage in [0, 1] (-1 = ignore)
         # for PixelwiseRegressionTask, instead of int64 class ids for the segmentation
@@ -91,6 +114,9 @@ class SubChipDataset(Dataset):
             mask = src.read(1).astype("float32" if self.target == "fraction" else "int64")
         s1 = _load_s1(row["s1"]) if self.has_s1 else None
         tower = _load_tower(row["tower"]) if self.has_tower else None
+        if self.drop_page_cache:
+            for col in ("image", "mask", *(["s1"] if self.has_s1 else [])):
+                _drop_from_page_cache(row[col])
 
         if self.augment:
             k = np.random.randint(4)
@@ -108,6 +134,12 @@ class SubChipDataset(Dataset):
                     s1 = s1[:, :, ::-1].copy()
                 if tower is not None:
                     tower = tower[:, :, ::-1].copy()
+            j = self.jitter
+            if j and np.random.rand() < j.get("p", 0.5):
+                g, o = float(j.get("gain", 0.0)), float(j.get("offset", 0.0))
+                gain = np.random.uniform(1 - g, 1 + g, (10, 1, 1)).astype("float32")
+                gain = np.tile(gain, (s2.shape[0] // 10, 1, 1))  # same draw for each revisit
+                s2 = (s2 * gain + np.float32(np.random.uniform(-o, o))).astype("float32")
 
         s2_t, mask_t = torch.from_numpy(s2), torch.from_numpy(mask)
         s1_t = torch.from_numpy(s1) if s1 is not None else None
@@ -161,6 +193,8 @@ class SubDataModule(LightningDataModule):
         upsample: int = 1,
         n_revisits: int = 1,
         target: str = "class",
+        jitter: dict | None = None,
+        drop_page_cache: bool = False,
     ):
         super().__init__()
         self.index_path = Path(index_path)
@@ -171,6 +205,8 @@ class SubDataModule(LightningDataModule):
         self.upsample = upsample
         self.n_revisits = n_revisits
         self.target = target
+        self.jitter = jitter
+        self.drop_page_cache = drop_page_cache
 
     def setup(self, stage: str | None = None) -> None:
         index = pd.read_parquet(self.index_path)
@@ -181,9 +217,11 @@ class SubDataModule(LightningDataModule):
             train = train.drop(val.index)
         self.train_ds = SubChipDataset(train, self.modalities, augment=True,
                                        upsample=self.upsample, n_revisits=self.n_revisits,
-                                       target=self.target)
+                                       target=self.target, jitter=self.jitter,
+                                       drop_page_cache=self.drop_page_cache)
         self.val_ds = SubChipDataset(val, self.modalities, upsample=self.upsample,
-                                     n_revisits=self.n_revisits, target=self.target)
+                                     n_revisits=self.n_revisits, target=self.target,
+                                     drop_page_cache=self.drop_page_cache)
 
     def train_dataloader(self) -> DataLoader:
         return DataLoader(self.train_ds, batch_size=self.batch_size, shuffle=True,
