@@ -1,0 +1,79 @@
+# v18 arm s1_recipe (scripts/build_v18_indexes.py; docs/issues/v18-improvements.md).
+# earthpv's v22 recipe: 40 epochs x 276 optimizer steps = 11040 steps, 1000 warmup,
+# cosine to 1e-6, EMA 0.999, jitter, seed 1; the model is the final weights (last.ckpt).
+# v5 S1 corpus (the v17 S1 control's), test-region chips dropped.
+data:
+  index_path: data/v18/s1_recipe.parquet
+  batch_size: 8
+  num_workers: 4
+  modalities:
+  - S1RTC
+  drop_page_cache: true
+  jitter:
+    p: 0.5
+    gain: 0.07
+    offset: 0.01
+task:
+  model_factory: EncoderDecoderFactory
+  model_args:
+    backbone: terramind_v1_tiny
+    backbone_pretrained: true
+    necks:
+    - name: SelectIndices
+      indices:
+      - 2
+      - 5
+      - 8
+      - 11
+    - name: ReshapeTokensToImage
+      remove_cls_token: false
+    - name: LearnedInterpolateToPyramidal
+    decoder: UNetDecoder
+    decoder_channels:
+    - 256
+    - 128
+    - 64
+    - 32
+    num_classes: 2
+    rescale: true
+    backbone_modalities:
+    - S1RTC
+    backbone_bands:
+      S1RTC:
+      - VV
+      - VH
+  loss: tversky
+  tversky_args:
+    alpha: 0.35
+    beta: 0.65
+    gamma: 1.33
+  ignore_index: -1
+  lr: 0.0001
+  optimizer: AdamW
+  optimizer_hparams:
+    weight_decay: 0.05
+  freeze_backbone: false
+  plot_on_val: false
+  scheduler: SequentialLR
+  scheduler_hparams:
+    interval: step
+    schedulers:
+      LinearLR:
+        start_factor: 0.01
+        end_factor: 1.0
+        total_iters: 1000
+      CosineAnnealingLR:
+        T_max: 10040
+        eta_min: 1.0e-06
+    milestones:
+    - 1000
+trainer:
+  max_epochs: 40
+  accumulate_grad_batches: 2
+seed: 1
+early_stopping: false
+ema:
+  decay: 0.999
+checkpoint_dir: data/models/v18_s1_recipe
+monitor: val/IoU_1
+monitor_mode: max
