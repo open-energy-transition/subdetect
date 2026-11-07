@@ -1,0 +1,424 @@
+<title>Core Label Review</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Condensed:wght@500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* Layout: a reviewer's light table. Sticky control strip, then one wide card per target:
+   Esri image left (the evidence), S2 label pair + grading right (the verdict). */
+:root {
+  --bg: #eef1f0; --surface: #ffffff; --ink: #17201e; --muted: #5a6763; --line: #d6ddda;
+  --accent: #2c4f86; --accent-soft: #e3eaf5;
+  --good: #1d7547; --good-soft: #e2f2e9; --ok: #946000; --ok-soft: #f8eedb;
+  --bad: #b42318; --bad-soft: #fbe6e3;
+  --osm: #ffd600; --core: #00e5ff; --ign: #ff2bd6; --swatch: #26302d;
+  --display: "IBM Plex Sans Condensed", "Arial Narrow", system-ui, sans-serif;
+  --body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #0e1312; --surface: #161d1b; --ink: #e3eae7; --muted: #93a29d; --line: #27312e;
+  --accent: #93b2ea; --accent-soft: #1d2a3f;
+  --good: #57c88f; --good-soft: #15291f; --ok: #e5ac45; --ok-soft: #2d2412;
+  --bad: #f27a69; --bad-soft: #351a17; --swatch: #0b0f0e; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #0e1312; --surface: #161d1b; --ink: #e3eae7; --muted: #93a29d; --line: #27312e;
+  --accent: #93b2ea; --accent-soft: #1d2a3f;
+  --good: #57c88f; --good-soft: #15291f; --ok: #e5ac45; --ok-soft: #2d2412;
+  --bad: #f27a69; --bad-soft: #351a17; --swatch: #0b0f0e; color-scheme: dark }
+
+* { box-sizing: border-box }
+body { background: var(--bg); color: var(--ink); font: 15px/1.55 var(--body) }
+body::before { content: ""; position: fixed; inset: 0 0 auto; height: env(safe-area-inset-top, 0px); z-index: 10; background: var(--surface) }
+.wrap { max-width: 1120px; margin: 0 auto; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)) }
+h1, h2 { font-family: var(--display); font-weight: 600; text-wrap: balance; margin: 0 }
+h1 { font-size: clamp(1.7rem, 3.4vw, 2.3rem); line-height: 1.1; letter-spacing: -0.01em }
+.eyebrow { font: 500 0.72rem/1 var(--mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted) }
+a { color: var(--accent) }
+button, input, textarea { font: inherit; color: inherit }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px }
+
+/* intro */
+.intro { padding-block: 32px 20px; display: grid; gap: 20px; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr) }
+.intro p { margin: 0; max-width: 64ch; color: var(--muted) }
+.intro .lead { color: var(--ink) }
+.intro-text { display: grid; gap: 12px; align-content: start; min-width: 0 }
+.panel { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; display: grid; gap: 14px; align-content: start; min-width: 0 }
+.legend { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; font-size: 0.88rem }
+.legend li { display: grid; grid-template-columns: 34px 1fr; gap: 10px; align-items: center }
+.sw { height: 20px; border-radius: 4px; background: var(--swatch); position: relative }
+.sw::after { content: ""; position: absolute; inset: 5px 6px; border: 2px solid var(--c) }
+.sw.fill::after { border: 0; background: color-mix(in srgb, var(--c) 55%, transparent) }
+.grades-def { display: grid; gap: 6px; font-size: 0.86rem; margin: 0 }
+.grades-def div { display: grid; grid-template-columns: 92px 1fr; gap: 8px }
+.grades-def dt { font-weight: 600 } .grades-def dd { margin: 0; color: var(--muted) }
+
+/* toolbar */
+.bar { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 5; background: var(--surface); border-block: 1px solid var(--line) }
+.bar .wrap { display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: center; padding-block: 10px }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 7px; overflow: hidden }
+.seg button { border: 0; background: transparent; padding: 5px 10px; font-size: 0.84rem; cursor: pointer; color: var(--muted) }
+.seg button + button { border-left: 1px solid var(--line) }
+.seg button[aria-pressed="true"] { background: var(--accent-soft); color: var(--ink); font-weight: 600 }
+.grp { display: flex; align-items: center; gap: 8px; flex-wrap: wrap }
+.grp > .eyebrow { min-width: max-content }
+.chk { display: inline-flex; align-items: center; gap: 6px; font-size: 0.84rem; cursor: pointer; white-space: nowrap }
+.chk i { width: 12px; height: 12px; border-radius: 3px; background: var(--c); display: inline-block }
+.progress { margin-left: auto; display: flex; align-items: center; gap: 12px; font: 0.82rem var(--mono); font-variant-numeric: tabular-nums; color: var(--muted) }
+.meter { width: 120px; height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; display: flex }
+.meter span { display: block; height: 100% }
+.btn { border: 1px solid var(--line); background: var(--surface); border-radius: 7px; padding: 5px 10px; font-size: 0.84rem; cursor: pointer }
+.btn:hover { border-color: var(--accent) }
+.status { font-size: 0.84rem; color: var(--muted); padding-block: 10px 0 }
+.status.warn { color: var(--bad) }
+
+/* cards */
+#cards { display: grid; gap: 18px; padding-block: 18px 48px }
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; scroll-margin-top: 80px }
+.card.active { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) }
+.card-h { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: baseline; padding: 10px 16px; border-bottom: 1px solid var(--line) }
+.card-h .num { font: 600 1.05rem var(--display) }
+.card-h .meta { font: 0.82rem var(--mono); color: var(--muted); font-variant-numeric: tabular-nums }
+.card-h .id { margin-left: auto; font: 0.75rem var(--mono); color: var(--muted) }
+.pill { font: 600 0.72rem/1 var(--body); letter-spacing: 0.03em; padding: 4px 8px; border-radius: 99px; align-self: center }
+.pill.core { background: var(--accent-soft); color: var(--accent) }
+.pill.nocore { background: var(--bad-soft); color: var(--bad) }
+.card-b { display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr) }
+.esri { position: relative; margin: 0; background: var(--swatch); align-self: start; max-width: 100% }
+.esri img { display: block; width: 100%; height: auto }
+.ly { position: absolute; inset: 0; background-size: 100% 300%; background-repeat: no-repeat; pointer-events: none }
+.ly-osm { background-position: 0 0 } .ly-core { background-position: 0 50% } .ly-ign { background-position: 0 100% }
+body.hide-osm .ly-osm, body.hide-core .ly-core, body.hide-ign .ly-ign { display: none }
+.side { padding: 14px 16px; display: grid; gap: 14px; align-content: start; min-width: 0 }
+.s2pair { display: grid; grid-template-columns: 1fr 1fr; gap: 10px }
+.s2pair figure { margin: 0; display: grid; gap: 4px; min-width: 0 }
+.s2pair figcaption { font-size: 0.74rem; color: var(--muted) }
+.s2pair canvas { width: 100%; height: auto; image-rendering: pixelated; border-radius: 4px; background: var(--swatch); display: block }
+.stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin: 0 }
+.stats div { display: grid; gap: 2px }
+.stats dt { font-size: 0.72rem; color: var(--muted) }
+.stats dd { margin: 0; font: 500 0.9rem var(--mono); font-variant-numeric: tabular-nums }
+.links { display: flex; gap: 14px; font-size: 0.84rem }
+.gradebtns { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px }
+.gradebtns button { border: 1px solid var(--line); background: var(--surface); border-radius: 7px; padding: 7px 4px; cursor: pointer; font-size: 0.86rem; font-weight: 500 }
+.gradebtns button kbd { font: 0.7rem var(--mono); color: var(--muted); margin-left: 4px }
+.gradebtns button:hover { border-color: var(--muted) }
+.gradebtns [data-g="good"][aria-pressed="true"] { background: var(--good-soft); border-color: var(--good); color: var(--good) }
+.gradebtns [data-g="acceptable"][aria-pressed="true"] { background: var(--ok-soft); border-color: var(--ok); color: var(--ok) }
+.gradebtns [data-g="harmful"][aria-pressed="true"] { background: var(--bad-soft); border-color: var(--bad); color: var(--bad) }
+.claude { font-size: 0.82rem; color: var(--muted); margin: -6px 0 0 }
+.claude b { font-weight: 600; color: var(--ink) }
+.claude .diff { color: var(--bad); font-weight: 600 }
+textarea { width: 100%; min-height: 54px; resize: vertical; border: 1px solid var(--line); border-radius: 7px; background: var(--bg); padding: 7px 9px; font-size: 0.86rem }
+.saved { font: 0.74rem var(--mono); color: var(--muted); min-height: 1em; margin: -8px 0 0 }
+.empty { padding: 40px; text-align: center; color: var(--muted) }
+.keys { font-size: 0.8rem; color: var(--muted) }
+kbd { font: 0.75rem var(--mono); border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 0 4px; background: var(--surface) }
+
+@media (max-width: 860px) {
+  .intro { grid-template-columns: minmax(0, 1fr) }
+  .card-b { grid-template-columns: minmax(0, 1fr) }
+  .progress { margin-left: 0 }
+}
+@media (prefers-reduced-motion: no-preference) { html { scroll-behavior: smooth } }
+</style>
+
+<section class="wrap intro">
+  <div class="intro-text">
+    <span class="eyebrow">subdetect · Esri core-label study · branch esri-core-probe-calibration</span>
+    <h1>Core Label Review</h1>
+    <p class="lead">Each card is one substation label from the Sentinel-2 training set. The rewrite keeps only the part of the OSM polygon where a DINOv2 probe on Esri imagery (0.3–2 m) sees switchyard equipment. The rest of the polygon is ignored in training rather than taught as background.</p>
+    <p>Both retraining studies came out neutral: Sentinel-1 fused AUC +0.018 over three seeds, Sentinel-2 −0.017 over two seeds, with both S2 seeds below control. This sheet is for checking the labels by eye. Was the trimming right, and where does it go wrong?</p>
+    <p><b>QC sample (60)</b>: the frozen G0.4 set, skewed toward large sites, with Claude's grades shown. <b>Random sample (40)</b>: drawn fresh from the training set (24 TorchGeo, 8 India, 8 Pakistan). It excludes every site used for tuning, QC or probe training.</p>
+  </div>
+  <div class="panel">
+    <ul class="legend">
+      <li><span class="sw" style="--c: var(--osm)"></span><span>OSM polygon, the old label</span></li>
+      <li><span class="sw" style="--c: var(--core)"></span><span>Core seen in Esri. Only the part inside the yellow line becomes positive.</span></li>
+      <li><span class="sw fill" style="--c: var(--ign)"></span><span>10 m pixels the rewrite turned to ignore</span></li>
+      <li><span class="sw fill" style="--c: #8a948f"></span><span>S2 panels only: ignored already in the OSM label (edge pixels)</span></li>
+    </ul>
+    <dl class="grades-def">
+      <div><dt style="color: var(--good)">Good</dt><dd>Core covers the equipment and drops only land without equipment.</dd></div>
+      <div><dt style="color: var(--ok)">Acceptable</dt><dd>Small loss of equipment, or some empty land kept.</dd></div>
+      <div><dt style="color: var(--bad)">Harmful</dt><dd>Substantial real equipment cut away, or the label sits on something that is not a substation.</dd></div>
+    </dl>
+    <p class="keys"><kbd>J</kbd> <kbd>K</kbd> next / previous card · <kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> grade it · click a pressed grade again to clear it</p>
+  </div>
+</section>
+
+<div class="bar">
+  <div class="wrap">
+    <div class="grp"><span class="eyebrow">Set</span>
+      <div class="seg" data-filter="set"><button aria-pressed="true" data-v="all">All</button><button data-v="qc" aria-pressed="false">QC 60</button><button data-v="random" aria-pressed="false">Random 40</button></div></div>
+    <div class="grp"><span class="eyebrow">Source</span>
+      <div class="seg" data-filter="source"><button aria-pressed="true" data-v="all">All</button><button data-v="Pakistan" aria-pressed="false">PK</button><button data-v="India" aria-pressed="false">IN</button><button data-v="TorchGeo" aria-pressed="false">TorchGeo</button></div></div>
+    <div class="grp"><span class="eyebrow">Result</span>
+      <div class="seg" data-filter="status"><button aria-pressed="true" data-v="all">All</button><button data-v="core" aria-pressed="false">Core</button><button data-v="no_core" aria-pressed="false">No core</button></div></div>
+    <div class="grp">
+      <label class="chk"><input type="checkbox" id="f-ungraded"> Ungraded only</label>
+      <button class="btn" id="next-ungraded" type="button">Next ungraded</button>
+      <button class="btn" id="export" type="button" hidden>Export grades (CSV)</button>
+    </div>
+    <div class="grp"><span class="eyebrow">Overlay</span>
+      <label class="chk"><input type="checkbox" id="t-osm" checked><i style="--c: var(--osm)"></i>OSM</label>
+      <label class="chk"><input type="checkbox" id="t-core" checked><i style="--c: var(--core)"></i>Core</label>
+      <label class="chk"><input type="checkbox" id="t-ign" checked><i style="--c: var(--ign)"></i>Ignored</label>
+    </div>
+    <div class="progress" aria-live="polite"><span id="p-text">0 of 100 graded</span><span class="meter" id="p-meter"></span></div>
+  </div>
+</div>
+
+<main class="wrap">
+  <p class="status" id="store-status">Loading saved grades…</p>
+  <p class="status" id="agree" hidden></p>
+  <div id="cards"></div>
+</main>
+
+<script type="application/json" id="data">__DATA__</script>
+<script>
+(() => {
+  const ROWS = JSON.parse(document.getElementById("data").textContent);
+  const byId = new Map(ROWS.map(r => [r.id, r]));
+  const state = new Map();               // id -> {grade, note}
+  const filters = { set: "all", source: "all", status: "all", ungraded: false };
+  const cards = document.getElementById("cards");
+  const GRADES = ["good", "acceptable", "harmful"];
+  const LABEL = { good: "Good", acceptable: "Acceptable", harmful: "Harmful" };
+  let db = null, active = null;
+
+  const fmt = n => n.toLocaleString("en-US");
+  const el = (tag, cls, txt) => { const e = document.createElement(tag); if (cls) e.className = cls; if (txt != null) e.textContent = txt; return e; };
+
+  // ---------- S2 label panels ----------
+  const COL = { osm: [255, 214, 0], core: [0, 229, 255], ign: [255, 43, 214], prior: [138, 148, 143] };
+  function drawLabel(canvas, r, which) {
+    const w = r.w10, h = r.h10, k = Math.max(4, Math.ceil(260 / Math.max(w, h)));
+    canvas.width = w * k; canvas.height = h * k;
+    const ctx = canvas.getContext("2d");
+    const img = new Image();
+    img.onload = () => {
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(img, 0, 0, w * k, h * k);
+      const cls = new Array(w * h);
+      for (let i = 0; i < w * h; i++) {
+        const o = r.old[i], n = r.new[i];
+        if (which === "old") cls[i] = o === "1" ? "osm" : (o === "i" ? "prior" : null);
+        else cls[i] = n === "1" ? "core" : (n === "i" ? (o === "i" ? "prior" : "ign") : null);
+      }
+      for (const c of ["prior", "ign", "osm", "core"]) {
+        const [R, G, B] = COL[c];
+        ctx.fillStyle = `rgba(${R},${G},${B},${c === "prior" ? 0.45 : 0.38})`;
+        ctx.beginPath();
+        for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (cls[y * w + x] === c) ctx.rect(x * k, y * k, k, k);
+        ctx.fill();
+        if (c === "osm" || c === "core") {
+          ctx.strokeStyle = `rgb(${R},${G},${B})`; ctx.lineWidth = Math.max(1.5, k / 4); ctx.beginPath();
+          const at = (x, y) => x >= 0 && y >= 0 && x < w && y < h && cls[y * w + x] === c;
+          for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+            if (!at(x, y)) continue;
+            if (!at(x, y - 1)) { ctx.moveTo(x * k, y * k); ctx.lineTo((x + 1) * k, y * k); }
+            if (!at(x, y + 1)) { ctx.moveTo(x * k, (y + 1) * k); ctx.lineTo((x + 1) * k, (y + 1) * k); }
+            if (!at(x - 1, y)) { ctx.moveTo(x * k, y * k); ctx.lineTo(x * k, (y + 1) * k); }
+            if (!at(x + 1, y)) { ctx.moveTo((x + 1) * k, y * k); ctx.lineTo((x + 1) * k, (y + 1) * k); }
+          }
+          ctx.stroke();
+        }
+      }
+    };
+    img.src = r.s2;
+  }
+
+  // ---------- cards ----------
+  function card(r) {
+    const a = el("article", "card"); a.id = "t-" + r.id; a.dataset.id = r.id; a.tabIndex = -1;
+    const h = el("header", "card-h");
+    h.append(el("span", "num", (r.set === "qc" ? "QC " : "Random ") + r.n), el("span", "", r.source),
+      el("span", "meta", `${fmt(r.area)} m² · Esri ${r.res} m${r.year ? " · " + r.year : ""}`),
+      el("span", "pill " + (r.status === "core" ? "core" : "nocore"), r.status === "core" ? "Core found" : "No core: whole label ignored"),
+      el("span", "id", r.id));
+    const b = el("div", "card-b");
+    const fig = el("figure", "esri"); fig.style.aspectRatio = `${r.ew} / ${r.eh}`;
+    const img = el("img"); img.loading = "lazy"; img.width = r.ew; img.height = r.eh; img.src = `e/${r.id}.jpg`;
+    img.alt = `Esri imagery around ${r.source} substation label ${r.id}`;
+    fig.append(img);
+    for (const l of ["osm", "core", "ign"]) { const d = el("div", "ly ly-" + l); d.style.backgroundImage = `url(m/${r.id}.png)`; fig.append(d); }
+
+    const side = el("div", "side");
+    const pair = el("div", "s2pair");
+    for (const [which, cap] of [["old", "Sentinel-2 · OSM label"], ["new", "Sentinel-2 · core label"]]) {
+      const f = el("figure"); const c = el("canvas"); c.setAttribute("aria-label", cap);
+      f.append(el("figcaption", "", cap), c); pair.append(f); drawLabel(c, r, which);
+    }
+    const kept = r.orig ? Math.round(100 * r.core / r.orig) : 0;
+    const dl = el("dl", "stats");
+    for (const [k, v] of [["OSM positive", `${fmt(r.orig)} px`], ["Kept positive", `${fmt(r.core)} · ${kept}%`], ["Now ignored", `${fmt(r.ign)} px`]]) {
+      const d = el("div"); d.append(el("dt", "", k), el("dd", "", v)); dl.append(d);
+    }
+    const links = el("div", "links");
+    const lo = el("a", "", "OpenStreetMap ↗"); lo.href = `https://www.openstreetmap.org/?mlat=${r.lat}&mlon=${r.lon}#map=18/${r.lat}/${r.lon}`; lo.target = "_blank"; lo.rel = "noopener";
+    const lg = el("a", "", "Google satellite ↗"); lg.href = `https://www.google.com/maps/@${r.lat},${r.lon},300m/data=!3m1!1e3`; lg.target = "_blank"; lg.rel = "noopener";
+    links.append(lo, lg);
+
+    const gb = el("div", "gradebtns"); gb.setAttribute("role", "group"); gb.setAttribute("aria-label", "Grade this label");
+    GRADES.forEach((g, i) => {
+      const btn = el("button"); btn.type = "button"; btn.dataset.g = g; btn.setAttribute("aria-pressed", "false");
+      btn.append(LABEL[g], Object.assign(el("kbd"), { textContent: String(i + 1) }));
+      btn.addEventListener("click", () => { setActive(a, false); const cur = state.get(r.id)?.grade; save(r.id, { grade: cur === g ? null : g }); });
+      gb.append(btn);
+    });
+    const cl = el("p", "claude");
+    const ta = el("textarea"); ta.id = "note-" + r.id; ta.placeholder = "Note (optional): what is wrong, what you see";
+    ta.setAttribute("aria-label", "Note for " + r.id);
+    let timer = null;
+    ta.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(() => save(r.id, { note: ta.value }), 900); });
+    ta.addEventListener("blur", () => { clearTimeout(timer); if ((state.get(r.id)?.note || "") !== ta.value) save(r.id, { note: ta.value }); });
+    const sv = el("p", "saved");
+    side.append(pair, dl, links, gb, cl, ta, sv);
+    b.append(fig, side);
+    a.append(h, b);
+    a.addEventListener("click", () => setActive(a, false));
+    return a;
+  }
+  const nodes = new Map();
+  for (const r of ROWS) { const c = card(r); nodes.set(r.id, c); cards.append(c); }
+  const empty = el("p", "empty", "No cards match these filters."); empty.hidden = true; cards.append(empty);
+
+  function paint(id) {
+    const r = byId.get(id), c = nodes.get(id), s = state.get(id) || {};
+    c.querySelectorAll(".gradebtns button").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.g === s.grade)));
+    const ta = c.querySelector("textarea");
+    if (document.activeElement !== ta) ta.value = s.note || "";
+    const cl = c.querySelector(".claude"); cl.textContent = "";
+    if (r.claude) {
+      cl.append("Claude graded ", Object.assign(el("b"), { textContent: LABEL[r.claude] || r.claude }));
+      if (r.claude_note) cl.append(": " + r.claude_note);
+      if (s.grade && s.grade !== r.claude) cl.append(" · ", el("span", "diff", "you differ"));
+    } else cl.hidden = true;
+  }
+
+  // ---------- filtering + progress ----------
+  function visible(r) {
+    return (filters.set === "all" || r.set === filters.set) && (filters.source === "all" || r.source === filters.source) &&
+      (filters.status === "all" || r.status === filters.status) && (!filters.ungraded || !state.get(r.id)?.grade);
+  }
+  function applyFilters() {
+    let n = 0;
+    for (const r of ROWS) { const v = visible(r); nodes.get(r.id).hidden = !v; n += v; }
+    empty.hidden = n > 0;
+  }
+  function progress() {
+    const c = { good: 0, acceptable: 0, harmful: 0 };
+    let agree = 0, qcGraded = 0;
+    for (const r of ROWS) {
+      const g = state.get(r.id)?.grade; if (!g) continue; c[g]++;
+      if (r.set === "qc" && r.claude) { qcGraded++; agree += g === r.claude; }
+    }
+    const tot = c.good + c.acceptable + c.harmful;
+    document.getElementById("p-text").textContent = `${tot} of ${ROWS.length} graded · ${c.good} good · ${c.acceptable} acc. · ${c.harmful} harmful`;
+    const m = document.getElementById("p-meter"); m.textContent = "";
+    for (const [g, col] of [["good", "var(--good)"], ["acceptable", "var(--ok)"], ["harmful", "var(--bad)"]]) {
+      const s = el("span"); s.style.width = (100 * c[g] / ROWS.length) + "%"; s.style.background = col; m.append(s);
+    }
+    const ag = document.getElementById("agree");
+    ag.hidden = qcGraded === 0;
+    ag.textContent = `QC sample: you agree with Claude on ${agree} of ${qcGraded} graded targets.`;
+  }
+  document.querySelectorAll(".seg").forEach(seg => seg.addEventListener("click", e => {
+    const b = e.target.closest("button"); if (!b) return;
+    seg.querySelectorAll("button").forEach(x => x.setAttribute("aria-pressed", String(x === b)));
+    filters[seg.dataset.filter] = b.dataset.v; applyFilters();
+  }));
+  document.getElementById("f-ungraded").addEventListener("change", e => { filters.ungraded = e.target.checked; applyFilters(); });
+  for (const l of ["osm", "core", "ign"]) document.getElementById("t-" + l).addEventListener("change", e => document.body.classList.toggle("hide-" + l, !e.target.checked));
+
+  // ---------- active card + keys ----------
+  function setActive(c, scroll) {
+    if (active === c) { if (scroll) c.scrollIntoView({ block: "start" }); return; }
+    active?.classList.remove("active"); active = c; c.classList.add("active");
+    if (scroll) { c.scrollIntoView({ block: "start" }); c.focus({ preventScroll: true }); }
+  }
+  const shown = () => [...nodes.values()].filter(c => !c.hidden);
+  function step(d) {
+    const list = shown(); if (!list.length) return;
+    const i = active ? list.indexOf(active) : -1;
+    if (i < 0) { // no active card on screen: start from the first card below the toolbar
+      const f = list.findIndex(c => c.getBoundingClientRect().top >= 60);
+      setActive(list[f < 0 ? list.length - 1 : (d > 0 ? f : Math.max(0, f - 1))], true); return;
+    }
+    setActive(list[Math.min(list.length - 1, Math.max(0, i + d))], true);
+  }
+  document.getElementById("next-ungraded").addEventListener("click", () => {
+    const list = shown(); const start = active ? list.indexOf(active) + 1 : 0;
+    const nxt = [...list.slice(start), ...list.slice(0, start)].find(c => !state.get(c.dataset.id)?.grade);
+    if (nxt) setActive(nxt, true);
+  });
+  document.addEventListener("keydown", e => {
+    if (e.target.closest("textarea, input") || e.metaKey || e.ctrlKey || e.altKey) return;
+    const k = e.key.toLowerCase();
+    if (k === "j") { step(1); e.preventDefault(); }
+    else if (k === "k") { step(-1); e.preventDefault(); }
+    else if (["1", "2", "3"].includes(k) && active) {
+      const g = GRADES[+k - 1], id = active.dataset.id; const cur = state.get(id)?.grade;
+      save(id, { grade: cur === g ? null : g }); e.preventDefault();
+    }
+  });
+
+  // ---------- storage ----------
+  const statusEl = document.getElementById("store-status");
+  const chains = new Map();
+  function save(id, patch) {
+    const next = { grade: null, note: "", ...(state.get(id) || {}), ...patch };
+    state.set(id, next); paint(id); progress();
+    const sv = nodes.get(id).querySelector(".saved");
+    if (!db) { try { localStorage.setItem("core-review", JSON.stringify([...state])); } catch (_) {} sv.textContent = "Kept in this browser only"; return; }
+    sv.textContent = "Saving…";
+    const ref = db.collection("reviews").doc(id);
+    const run = (chains.get(id) || Promise.resolve()).then(() => {
+      const s = state.get(id);
+      return (!s.grade && !s.note) ? ref.delete() : ref.set({ grade: s.grade, note: s.note, set: byId.get(id).set, at: new Date().toISOString() });
+    }).then(() => { sv.textContent = "Saved"; }, err => { sv.textContent = "Not saved: " + (err?.message || err?.code || "the store refused the write"); });
+    chains.set(id, run);
+  }
+  function loadLocal() {
+    try { for (const [id, s] of JSON.parse(localStorage.getItem("core-review") || "[]")) if (byId.has(id)) state.set(id, s); } catch (_) {}
+  }
+  ROWS.forEach(r => paint(r.id)); progress(); applyFilters();
+
+  document.getElementById("export").addEventListener("click", () => {
+    const q = v => '"' + String(v ?? "").replace(/"/g, '""') + '"';
+    const lines = ["target_id,set,n,source,status,grade,note,claude_grade"];
+    for (const r of ROWS) { const s = state.get(r.id) || {}; lines.push([r.id, r.set, r.n, r.source, r.status, s.grade || "", s.note || "", r.claude].map(q).join(",")); }
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([lines.join("\n") + "\n"], { type: "text/csv" }));
+    a.download = "grades.csv"; document.body.append(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  });
+
+  (async () => {
+    db = window.claude?.use ? await window.claude.use("db").catch(() => null) : null;
+    if (!db && location.protocol === "file:") {  // local copy opened from disk
+      loadLocal(); ROWS.forEach(r => paint(r.id)); progress(); applyFilters();
+      document.getElementById("export").hidden = false;
+      statusEl.textContent = "Local copy: grades are kept in this browser. Use Export grades to save them as a CSV, e.g. next to this file as grades.csv.";
+      return;
+    }
+    if (!db) {
+      loadLocal(); ROWS.forEach(r => paint(r.id)); progress(); applyFilters();
+      statusEl.textContent = "Grades can't be saved to the page in this view. They stay in this browser only, and Claude can't read them. Open the page on claude.ai while signed in to save them.";
+      statusEl.classList.add("warn"); return;
+    }
+    const t = setTimeout(() => { statusEl.textContent = "Saved grades can't be reached yet. Grades you set now will save when the connection returns."; statusEl.classList.add("warn"); }, 10000);
+    db.collection("reviews").onSnapshot(snap => {
+      if (!snap.metadata.fromCache) { clearTimeout(t); statusEl.classList.remove("warn"); statusEl.textContent = "Grades save automatically to this page. Ask Claude to read them when you are done."; }
+      for (const ch of snap.docChanges()) {
+        const id = ch.doc.id; if (!byId.has(id)) continue;
+        if (ch.type === "removed") state.delete(id);
+        else { const d = ch.doc.data() || {}; state.set(id, { grade: d.grade || null, note: d.note || "" }); }
+        paint(id);
+      }
+      progress(); if (filters.ungraded) applyFilters();
+    }, err => { clearTimeout(t); statusEl.textContent = "Saved grades could not be loaded (" + (err?.code || "error") + "). Reload the page to try again."; statusEl.classList.add("warn"); });
+  })();
+})();
+</script>

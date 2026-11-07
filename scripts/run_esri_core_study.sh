@@ -3,6 +3,8 @@
 #
 #   scripts/run_esri_core_study.sh s1 "0 1 2"     # S1 study: train, infer, fuse, field_eval
 #   scripts/run_esri_core_study.sh s2 "0 1"       # S2 study
+#   ARMS=filt LOG=data/esri_core/run_s2_filt.log scripts/run_esri_core_study.sh s2 "0 1"
+#                                                 # filter-only arm vs the already-evaluated ctl runs
 #
 # Launch under systemd so the harness cannot kill it (memory: feedback-background-chaining):
 #   systemd-run --user --unit=subdetect-v17-s1 --working-directory=$PWD --setenv=HOME=$HOME \
@@ -18,7 +20,9 @@ set -u
 STUDY=$1
 SEEDS=$2
 PIXI=/home/tobi/.pixi/bin/pixi
-LOG=data/esri_core/run_${STUDY}.log
+LOG=${LOG:-data/esri_core/run_${STUDY}.log}
+ARMS=${ARMS:-"ctl core"}  # arms to train + evaluate; the verdict compares ctl with the last one
+AB_ARM=${ARMS##* }
 # GPU jobs take turns with earthpv's, which hold this lock for training/eval (shared 6 GB GTX 1060)
 GPU_LOCK=${GPU_LOCK:-/run/media/tobi/aidisc/earthpv/data/.gpu.lock}
 case $STUDY in
@@ -40,7 +44,7 @@ EOF
 }
 
 for s in $SEEDS; do
-  for arm in ctl core; do
+  for arm in $ARMS; do
     cfg=configs/terramind_sub_v17_${STUDY}_${arm}_seed${s}.yaml
     # a relaunch skips finished runs (resuming one would train it an extra epoch past EarlyStopping)
     if grep -qF "TRAIN exit 0 $cfg" "$LOG"; then echo "$(date '+%F %T') TRAIN skip (done) $cfg" >> "$LOG"; continue; fi
@@ -51,7 +55,7 @@ for s in $SEEDS; do
 done
 
 for s in $SEEDS; do
-  for arm in ctl core; do
+  for arm in $ARMS; do
     name=v17_${STUDY}_${arm}_seed${s}
     ck=$(best_ckpt data/models/stageA_${name} | tail -1)
     echo "$(date '+%F %T') INFER $name <- $ck" >> "$LOG"
@@ -63,5 +67,5 @@ for s in $SEEDS; do
         --prob-dir "data/osmose_regions/sindh_test_${name}_fused/prob" --labels pakistan >> "$LOG" 2>&1
   done
 done
-"$PIXI" run -e ml python scripts/esri_core_ab.py --prefix "v17_${STUDY}" --seeds $SEEDS >> "$LOG" 2>&1
+"$PIXI" run -e ml python scripts/esri_core_ab.py --prefix "v17_${STUDY}" --seeds $SEEDS --arm "$AB_ARM" >> "$LOG" 2>&1
 echo "$(date '+%F %T') DONE" >> "$LOG"

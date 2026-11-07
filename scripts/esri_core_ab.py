@@ -1,7 +1,7 @@
 """Paired A/B verdict for the ESRI core-label study (docs/issues/esri-core-labels.md).
 
-Reads field_eval.csv rows (eval_version 2) for `<prefix>_ctl_seed{s}` / `<prefix>_core_seed{s}`
-run names, computes per-seed paired differences, and applies the pre-registered rule:
+Reads field_eval.csv rows (eval_version 2) for `<prefix>_ctl_seed{s}` / `<prefix>_<arm>_seed{s}`
+run names (arm = core by default; `--arm filt` for the filter-only arm), computes per-seed paired differences, and applies the pre-registered rule:
 
   PASS     mean d >= +0.02 AND every d_s > 0 AND mean P@50 difference >= 0
   FAIL     mean d <= -0.02 AND every d_s < 0
@@ -57,6 +57,7 @@ def main() -> None:
     ap.add_argument("--prefix", required=True, help="e.g. v17_s1")
     ap.add_argument("--seeds", type=int, nargs="+", required=True)
     ap.add_argument("--labels", default="pakistan")
+    ap.add_argument("--arm", default="core", help="arm compared against ctl: core | filt")
     a = ap.parse_args()
 
     df = pd.read_csv(CSV)
@@ -65,7 +66,7 @@ def main() -> None:
     rows = []
     for kind in ("alone", "fused"):
         for s in a.seeds:
-            for arm in ("ctl", "core"):
+            for arm in ("ctl", a.arm):
                 rn = f"{a.prefix}_{arm}_seed{s}" + ("_fused" if kind == "fused" else "")
                 if rn not in df.index:
                     print(f"missing field_eval row: {rn}")
@@ -82,10 +83,10 @@ def main() -> None:
 
     for kind in ("alone", "fused"):
         w = t[t.kind == kind].pivot(index="seed", columns="arm")
-        if not {"ctl", "core"} <= set(t[t.kind == kind].arm):
+        if not {"ctl", a.arm} <= set(t[t.kind == kind].arm):
             continue
-        d = pd.DataFrame({m: w[m]["core"] - w[m]["ctl"] for m in METRICS + ["inside"]})
-        print(f"\n[{kind}] paired differences core - ctl:")
+        d = pd.DataFrame({m: w[m][a.arm] - w[m]["ctl"] for m in METRICS + ["inside"]})
+        print(f"\n[{kind}] paired differences {a.arm} - ctl:")
         print(d.round(3).to_string())
         print("mean:", d.mean().round(3).to_dict())
         if kind == "fused":
@@ -96,7 +97,7 @@ def main() -> None:
                 verdict = "FAIL"
             else:
                 verdict = "NEUTRAL"
-            print(f"\nVERDICT ({a.prefix}, primary = fused AUC, n_seeds={len(dauc)}): {verdict}")
+            print(f"\nVERDICT ({a.prefix} {a.arm} vs ctl, primary = fused AUC, n_seeds={len(dauc)}): {verdict}")
 
 
 if __name__ == "__main__":

@@ -1,7 +1,9 @@
 # Core-only substation labels from Esri imagery: do they make a better S2/S1 detector?
 
 **Status:** pre-registered 2026-10-31 on branch `esri-core-labels`. Stage 0 passed (G0.1-G0.4,
-2026-11-01); S1 study training, S2 study queued behind it; no training number exists yet.
+2026-11-01); S1 study finished 2026-11-02: NEUTRAL; S2 study finished 2026-11-05: NEUTRAL, leaning negative (both seeds below control).
+Neither study meets PASS; production labels stay. Stage 2 (filter-only arm: drop bad OSM labels,
+keep the rest whole) pre-registered and training from 2026-11-05.
 Results are appended under `## Results`. The gates and decision rules below are not to be
 moved after seeing data.
 
@@ -202,3 +204,122 @@ the runner now skips runs its log marks finished, so only core seed 2 trains bef
 S2 study queued 2026-11-01 07:24 (`subdetect-v17-s2`, `scripts/run_esri_core_study.sh s2
 "0 1"`, log `data/esri_core/run_s2.log`). It waits for the S1 unit to exit, then trains its
 four runs under the same GPU lock. Partner arm for fusion = production S1 `v5`.
+
+**Hard crash, 2026-11-02 ~13:55.** The machine went down with no clean shutdown (cause unknown:
+no Xid/MCE in the journal, whose last 5 minutes were lost; memory fine; no kdump), about 30
+minutes after S1 inference began sharing the GPU with S2 ctl seed 1 training under a private
+lock. All S1 training was complete. Effect on the study:
+
+- **S1:** `sindh_test_v17_s1_ctl_seed1/prob` was being written; 13 of 145 cells were lost (8 of
+  them 0-byte tifs that `infer` would have skipped as done). The whole arm was deleted and
+  regenerated. `_write` is now atomic and fsynced. The other rasters, checkpoints, composites and
+  `field_eval.csv` were read back and are intact.
+- **S2 ctl seed 1 resumes from epoch 5** (`last.ckpt` intact). **Deviation from the design:** its
+  data order after epoch 5 no longer matches its core partner's, because a resume re-seeds rather
+  than restoring RNG state. Same init and labels-only difference still hold, and the decision
+  rule is unchanged. The other seven runs are unaffected.
+- Relaunched 14:11 as `subdetect-v17-s1d` and `subdetect-v17-s2b` (S2 waits for S1), both back on
+  the shared GPU lock, so the GPU jobs no longer overlap.
+
+**S2 oomd kill, 2026-11-03 06:59.** systemd-oomd killed `subdetect-v17-s2b` during core seed 1
+(user-session memory pressure 82% > 50%; the unit was the top reclaimer at 18.6 GB, mostly chip
+page cache; earthpv's Spain compose was running beside it). Ctl seed 0, core seed 0 and ctl seed 1
+had finished (best epochs 15, 8 and 24). Nothing ran for 34 h. Relaunched 2026-11-04 17:07 as
+`subdetect-v17-s2c` with `Restart=on-failure`. Training and inference are idempotent, and
+`esri_core_ab.py` keeps the last row per run. **Deviation:** core seed 1 resumes from `last.ckpt`
+(epoch 7), so like its ctl partner its data order no longer matches after the resume. Seed 0 is
+the only fully paired S2 seed. The decision rule is unchanged.
+
+### S1 study result (2026-11-02): NEUTRAL
+
+Primary metric = AUC of the mean fusion with production S2 `v12_up2`, on `sindh_test`, raw OSM labels:
+
+| seed | fused AUC ctl | fused AUC core | d | P@50 ctl -> core | hits ctl -> core | candidates ctl -> core | arm-alone AUC ctl -> core |
+|---|---|---|---|---|---|---|---|
+| 0 | 0.909 | 0.907 | -0.002 | 0.74 -> 0.70 | 54 -> 52 | 690 -> 640 | 0.793 -> 0.797 |
+| 1 | 0.856 | 0.878 | +0.022 | 0.74 -> 0.72 | 61 -> 51 | 1114 -> 614 | 0.843 -> 0.732 |
+| 2 | 0.852 | 0.885 | +0.033 | 0.76 -> 0.70 | 56 -> 52 | 643 -> 732 | 0.692 -> 0.735 |
+| mean | 0.872 | 0.890 | **+0.018** | -0.04 | -5.3 | -154 | -0.021 |
+
+The PASS rule fails on all three conditions: mean d is below +0.02, seed 0 is negative, and mean
+P@50 fell. FAIL does not apply either (mean d is positive). Per the pre-registered wording this is
+"no detectable effect at this power", not evidence of absence.
+
+Secondary metrics, descriptive only: core puts more of its predicted area inside OSM polygons in
+every seed (fused share +0.06 to +0.10, e.g. 0.219 -> 0.322 on seed 0), which is the localisation
+the labels aim for. It also loses recall on the largest substations (>=20,000 m2, fused: -0.143 on
+seeds 1 and 2, unchanged on seed 0; arm alone: lower on all three) and finds fewer hits in all
+three seeds. Reseed noise is as large as the effect: control arm-alone AUC alone spans 0.69-0.84.
+
+### S2 study result (2026-11-05): NEUTRAL, both seeds negative
+
+Core seed 1 finished 2026-11-04 19:28 (best epoch 4, stopped at 14). Inference, field_eval and
+`esri_core_ab.py` finished 2026-11-05 06:12, with no further oomd kill. Primary metric = AUC of the
+mean fusion with production S1 `v5_s1only`, on `sindh_test`, raw OSM labels:
+
+| seed | fused AUC ctl | fused AUC core | d | P@50 ctl -> core | hits ctl -> core | candidates ctl -> core | arm-alone AUC ctl -> core |
+|---|---|---|---|---|---|---|---|
+| 0 | 0.869 | 0.859 | -0.010 | 0.68 -> 0.64 | 48 -> 47 | 680 -> 819 | 0.834 -> 0.831 |
+| 1 | 0.876 | 0.852 | -0.024 | 0.68 -> 0.64 | 48 -> 47 | 629 -> 589 | 0.870 -> 0.783 |
+| mean | 0.873 | 0.856 | **-0.017** | -0.04 | -1 | +50 | -0.045 |
+
+PASS fails (mean d is negative). FAIL needs mean d <= -0.02 with every seed negative: both seeds
+are negative, but the mean misses the bar by 0.003. So the verdict is NEUTRAL by the rule, and every
+reading points the same way. Arm alone, core is worse on both seeds: AUC -0.045, P@50 0.12 -> 0.02
+and 0.44 -> 0.24, recall lower in every area bucket. Unlike S1, the core S2 arm does **not** put
+more of its predicted area inside OSM polygons: the inside share falls on both seeds (arm alone
+-0.017, fused -0.017). For reference, production `v12_up2_mean_fusion` scores 0.868 / P@50 0.74
+under eval_version 2; the control arms here match it and the core arms fall short.
+
+Descriptive: the core arms hit their best validation score early (epochs 8 and 4, against 15 and
+24 for control). Validation is scored on each arm's own labels, so this is not a field result.
+
+### Conclusion
+
+Neither study passes. S1 is neutral with a small, seed-unstable AUC gain (+0.018), lower P@50 and
+fewer hits. S2 is neutral, leaning negative (-0.017, both seeds negative). Core-only labels from
+Esri imagery do not give a better detector at this power, and production keeps the full OSM burn.
+The label-quality gates all passed, so the null is not caused by bad trimming. Discarding about
+half of all positive pixels (the ignored property land, plus 16k tiny targets) costs more
+supervision than tighter outlines give back. That matches v6 and v7: in this project, data
+quantity has been the recall lever.
+
+## Stage 2: filter-only arm (pre-registered 2026-11-05, before training)
+
+**Why.** The owner reviewed the core labels on the review page (`data/esri_core_review/`, built by
+`scripts/esri_core_review_page.py`) and judged that the trimmed labels do not look good. The new
+question is narrower: is the probe good enough to find the OSM labels that are *wrong*, if we drop
+those and keep every other label as its full OSM burn?
+
+**Rule.** Per target, core share = core_px / orig_px from the Stage 0 rewrite (`core_stats.parquet`,
+thr 0.76, dilate 0). A target with core share < 0.10 has its whole group set to ignore (-1). This
+covers every `no_core` target. All other targets keep the control's OSM burn untouched; `no_imagery`
+targets are kept. Script: `scripts/esri_core_filter_labels.py`. The only difference from the control
+arm is which targets are ignored.
+
+**Why 0.10.** It was chosen before training, from a visual check rather than tuning: 24 random targets
+of >= 6,000 m2 with core share < 0.10 (sheets in the session scratchpad, ids drawn with
+random_state 3). About 20 of 24 sit on forest, houses, fields, construction sites, factory roofs or
+empty land, and one is offset beside a real switchyard. One or two may be indoor (GIS) substations,
+which a 10 m model cannot see as a switchyard anyway. The `no_core` targets < 2,000 m2 were already
+checked in Stage 0's supplementary check (0/36 show equipment).
+
+| corpus | targets dropped | positive px -> ignore |
+|---|---|---|
+| S2 (`data/chips_v17_filter`) | 18,071 of 51,361 (TorchGeo 36.6%, India 13.7%, Pakistan 3.5%) | 6.4% |
+| S1 (`data/chips_v5_filter`) | 239 of 2,641 | 7.8% |
+
+By target size (S2 corpus): 92% of targets < 2,000 m2 are dropped, 23% at 2-6k, 8% at 6-20k, 6% above.
+
+**Design.** Arm `filt`, configs `terramind_sub_v17_{s1,s2}_filt_seed{N}.yaml` (control config with only
+`index_path` and `checkpoint_dir` changed). It is paired by seed with the already-trained and evaluated
+control runs (S2 seeds 0-1, S1 seeds 0-2), so only the filt arm trains. The S2 ctl seed 1 resume
+deviation from Stage 1 carries over. Run order: S2 first, then S1 (`ARMS=filt`, logs
+`data/esri_core/run_{s2,s1}_filt.log`). Evaluation and decision rule are unchanged from Stage 1
+(`esri_core_ab.py --arm filt`): fused AUC on `sindh_test` against raw OSM polygons;
+PASS = mean d >= +0.02, every seed > 0, mean P@50 difference >= 0; FAIL = mean d <= -0.02, every
+seed < 0; NEUTRAL otherwise.
+
+One point to read the result against: `sindh_test` scores against raw OSM polygons, so a model
+that learned to skip the label types this filter drops (tiny kiosks, misplaced polygons) is not
+rewarded for it there. Where Pakistan's own OSM labels are of those kinds, it is penalised.

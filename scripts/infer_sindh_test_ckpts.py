@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -34,11 +35,18 @@ REG = ROOT / "data/osmose_regions"
 
 
 def _write(path: Path, arr: np.ndarray, crs, transform) -> None:
+    # Atomic and durable: `infer` resumes on "file exists", so a crash must never leave a partial
+    # tif under its final name (the 2026-11-02 hard crash left 0-byte ones). The temp name does
+    # not end in .tif, so a leftover is invisible to the *.tif globs downstream.
     path.parent.mkdir(parents=True, exist_ok=True)
-    with rasterio.open(path, "w", driver="GTiff", width=arr.shape[1], height=arr.shape[0],
+    tmp = path.with_name(path.name + ".tmp")
+    with rasterio.open(tmp, "w", driver="GTiff", width=arr.shape[1], height=arr.shape[0],
                        count=1, dtype="uint8", crs=crs, transform=transform,
                        compress="deflate", predictor=2) as dst:
         dst.write(arr, 1)
+    with open(tmp, "rb") as f:
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
 
 
 def cmd_infer(a) -> None:
